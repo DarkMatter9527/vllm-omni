@@ -26,7 +26,7 @@ MODEL = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
 PROMPT = "Two anthropomorphic cats in boxing gear on a spotlighted stage."
 NEGATIVE_PROMPT = "low quality, blurry, watermark, text"
 
-SINGLE_CARD_FEATURE_MARKS = hardware_marks(res={"cuda": "H100"})
+SINGLE_CARD_FEATURE_MARKS = hardware_marks(res={"cuda": "H100", "npu": "A3"})
 
 
 def _get_diffusion_feature_cases(model: str):
