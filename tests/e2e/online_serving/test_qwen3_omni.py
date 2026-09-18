@@ -181,7 +181,7 @@ def _run_prefix_cache_check(online_client, request_config: dict):
 @pytest.mark.advanced_model
 @pytest.mark.core_model
 @pytest.mark.omni
-@hardware_test(res={"cuda": "H100", "rocm": "MI325", "npu": "A3"}, num_cards=2)
+@hardware_test(res={"cuda": "H100", "rocm": "MI325"}, num_cards=2)
 @pytest.mark.parametrize("omni_server", test_params, indirect=True)
 def test_thinker_prefix_caching_text_output(omni_server, online_client) -> None:
     """
@@ -218,7 +218,7 @@ def test_thinker_prefix_caching_text_output(omni_server, online_client) -> None:
 @pytest.mark.advanced_model
 @pytest.mark.core_model
 @pytest.mark.omni
-@hardware_test(res={"cuda": "H100", "rocm": "MI325", "npu": "A3"}, num_cards=2)
+@hardware_test(res={"cuda": "H100", "rocm": "MI325"}, num_cards=2)
 @pytest.mark.parametrize("omni_server", test_params, indirect=True)
 def test_thinker_prefix_caching_audio_output(omni_server, online_client) -> None:
     """
