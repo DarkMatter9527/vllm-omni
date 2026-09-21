@@ -26,16 +26,31 @@ MODEL = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
 PROMPT = "Two anthropomorphic cats in boxing gear on a spotlighted stage."
 NEGATIVE_PROMPT = "low quality, blurry, watermark, text"
 
-SINGLE_CARD_FEATURE_MARKS = hardware_marks(res={"cuda": "H100", "npu": "A3"})
+CUDA_SINGLE_CARD_FEATURE_MARKS = hardware_marks(res={"cuda": "H100"}, num_cards=1)
+NPU_TP2_FEATURE_MARKS = hardware_marks(res={"npu": "A3"}, num_cards=2)
 
 
 def _get_diffusion_feature_cases(model: str):
-    """Return a single default ``OmniServerParams`` row (no extra ``server_args``)."""
+    """Return one param per platform.
+
+    CUDA: single card, no extra server_args — behavior unchanged.
+    NPU: TP=2 to fit Wan2.2-T2V-A14B across two A3 cards (each 64 GB HBM).
+    """
     return [
+        # CUDA: single card, no extra server_args
         pytest.param(
             OmniServerParams(model=model),
             id="default",
-            marks=SINGLE_CARD_FEATURE_MARKS,
+            marks=CUDA_SINGLE_CARD_FEATURE_MARKS,
+        ),
+        # NPU: TP=2 across two cards
+        pytest.param(
+            OmniServerParams(
+                model=model,
+                server_args=["--tensor-parallel-size", "2"],
+            ),
+            id="default",
+            marks=NPU_TP2_FEATURE_MARKS,
         ),
     ]
 
