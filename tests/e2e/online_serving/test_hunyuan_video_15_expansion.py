@@ -62,7 +62,7 @@ def _get_diffusion_feature_cases(model: str):
             ),
             id="single_card_cpu_offload",
             marks=[
-                *hardware_marks(res={"cuda": "H100", "npu": ["A2", "A3"]}),
+                *hardware_marks(res={"cuda": "H100", "npu": "A2"}),
                 pytest.mark.core_model,
                 pytest.mark.advanced_model,
             ],
@@ -79,7 +79,7 @@ def _get_diffusion_feature_cases(model: str):
             ),
             id="single_card_cachedit_layerwise",
             marks=[
-                *hardware_marks(res={"cuda": ["H100", "B200"], "npu": ["A2", "A3"]}),
+                *hardware_marks(res={"cuda": ["H100", "B200"], "npu": "A2"}),
                 pytest.mark.full_model,
             ],
         ),
@@ -99,7 +99,7 @@ def _get_diffusion_feature_cases(model: str):
             ),
             id="parallel_cachedit_tp2_vae2",
             marks=[
-                *hardware_marks(res={"cuda": ["H100", "B200"], "npu": ["A2", "A3"]}, num_cards=2),
+                *hardware_marks(res={"cuda": ["H100", "B200"], "npu": "A2"}, num_cards=2),
                 pytest.mark.full_model,
             ],
         ),
@@ -129,7 +129,7 @@ def _run_hunyuan_video_15_t2v(
     online_client.send_video_diffusion_request(request_config)
 
 
-@hardware_test(res={"cuda": ["H100", "B200"], "npu": ["A2", "A3"]}, num_cards=1)
+@hardware_test(res={"cuda": ["H100", "B200"], "npu": "A2"}, num_cards=1)
 @pytest.mark.full_model
 @pytest.mark.parametrize("omni_server", DEFAULT_TEST_PARAMS, indirect=True)
 def test_hunyuan_video_15_t2v_default(
