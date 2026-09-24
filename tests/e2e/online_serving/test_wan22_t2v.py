@@ -5,7 +5,8 @@
 Online serving smoke for ``Wan-AI/Wan2.2-T2V-A14B-Diffusers`` (text-to-video via ``/v1/videos``).
 
 Uses a single ``default`` ``OmniServerParams`` row via ``_get_diffusion_feature_cases`` (no extra
-``server_args``). Multi-variant / parallel coverage lives in ``test_wan22_expansion.py`` (L4).
+``server_args``), with explicit startup budgets for loading both experts from slow storage.
+Multi-variant / parallel coverage lives in ``test_wan22_expansion.py`` (L4).
 
 From ``tests/``::
 
@@ -53,7 +54,7 @@ def _get_diffusion_feature_cases(model: str):
     return [
         # CUDA: single card, no extra server_args
         pytest.param(
-            OmniServerParams(model=model),
+            OmniServerParams(model=model, init_timeout=1800, stage_init_timeout=1800, startup_timeout=2100),
             id="default",
             marks=CUDA_SINGLE_CARD_FEATURE_MARKS,
         ),
