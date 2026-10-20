@@ -538,9 +538,14 @@ class Qwen3TTSPromptEmbedsBuilder:
 
     def _codec_embeds(self, values: Sequence[int], device: torch.device) -> torch.Tensor:
         """Codec embeddings of constant ids, ``[1, len(values), H]`` (the table is fixed after load)."""
+        """
+        专门用来把 codec 词表的"指令 tag"序列查表变成 embedding，拼进 prompt:
+        codec 词表不仅有 16 层 RVQ 的码值（给实际音频帧用），还预留了一批控制 token（think/bos/eos/pad/language_id），
+        这些控制 token 就靠`_codec_embeds` 查出来拼进 prompt 的指令段里。
+        """
         device = torch.device(device)
         key = (str(device), tuple(int(v) for v in values))
-        cache = self.__dict__.setdefault("_codec_embed_cache", {})
+        cache = self.__dict__.setdefault("_codec_embed_cache", {}) # setdefault:字典里面找不到codec_embed_cache,就返回空字典
         cached = cache.get(key)
         if cached is None:
             cached = cache[key] = self._codec_embed(self._long_tensor(values, device))
@@ -1214,7 +1219,7 @@ class Qwen3TTSPromptEmbedsBuilder:
         info_dict: dict[str, Any],
     ) -> tuple[torch.Tensor, torch.Tensor, int | None, torch.Tensor | None]:
         """Build the prefill prompt embeddings for a single TTS request.
-
+        
         Args:
             task_type: One of ``"CustomVoice"``, ``"VoiceDesign"``, ``"Base"``.
             info_dict: Per-request ``additional_information`` plus any
@@ -1222,18 +1227,18 @@ class Qwen3TTSPromptEmbedsBuilder:
                 (``PRECOMPUTED_TEXT_IDS_KEY``, ``PRECOMPUTED_REF_IDS_KEY``,
                 ``PRECOMPUTED_REF_CODE_KEY``, ``NORMALIZED_REF_AUDIO_KEY``).
                 Consumed keys are popped so the caller doesn't re-feed them
-                on subsequent prefill chunks.
+                on subsequent prefill chunks. 
 
         Returns:
             ``(talker_prompt, trailing_text_hidden, ref_code_len, ref_code)``:
-
+            
             * ``talker_prompt``: ``[prompt_len, hidden]`` prefill embedding.
             * ``trailing_text_hidden``: ``[T, hidden]`` queue of text-side
                     embeddings consumed one-per-decode-step (streaming mode)
                     or a single pad row (non-streaming).
             * ``ref_code_len``: Number of ref codec frames consumed when the
                     Base task ran in in-context mode (``None`` otherwise).
-            * ``ref_code``: The ``[T, Q]`` ref codec tensor used for ICL
+            * ``ref_code``: The ``[T, Q]`` ref codec tensor used for ICL (T = 参考音频经 codec 编码后的帧数,Q为码本数量)
                     (``None`` outside Base / ICL).
         """
         config = self._config
@@ -1684,6 +1689,9 @@ class Qwen3TTSPromptEmbedsBuilder:
                 self.__dict__.setdefault("_cv_fast_keys", {})[(self._speaker_field(info_dict), language)] = cache_key
             talker_prompt = prefix
 
+            """
+            `trailing_text_hidden` 是 prefill 之后剩余文本 token 的 embedding 队列 ，形状`[T, hidden]` 
+            """
             if non_streaming_mode:
                 text_all = self._batched_text_embeds.pop(str(info_dict.get("req_id")), None)
                 if text_all is None:
@@ -1692,8 +1700,10 @@ class Qwen3TTSPromptEmbedsBuilder:
                 talker_prompt = torch.cat([talker_prompt, text_all + pad_row, eos_row, tail], dim=1)
                 trailing_text_hidden = tts_pad_embed
             else:
+                # prefill 只放第一个文本 token
                 first_text = text_projection(text_embedding(input_ids[:, 3:4])) + codec_input[:, -1:]
                 talker_prompt = torch.cat([talker_prompt, first_text], dim=1)
+                # 剩余文本 token + eos 放进队列，留给 decode 阶段逐帧消费
                 trailing_text_hidden = torch.cat(
                     (
                         text_projection(text_embedding(input_ids[:, 4:-5])),
@@ -1935,5 +1945,5 @@ class Qwen3TTSPromptEmbedsBuilder:
                     prompt_len += assistant_len - 6
                 else:
                     prompt_len += 1
-
+        # 返回
         return max(2, int(prompt_len))

@@ -214,6 +214,7 @@ class OmniBase(PDDisaggregationMixin):
         self.transfer_metrics = OmniTransferMetrics(model_name=model, log_stats=log_stats)
         self.prom_metrics = OmniPrometheusMetrics(model_name=model, log_stats=log_stats)
         st = time.time()
+        # 引擎在子类实现，在父类创建可用实例
         self.engine = self._create_engine(
             model=model,
             init_timeout=init_timeout,
@@ -256,9 +257,10 @@ class OmniBase(PDDisaggregationMixin):
         # PD disaggregation state (detects if a prefill/decode stage pair is configured)
         self._init_pd_state()
 
+    # 这里不是引擎的创建，创建在子类omni中
     def _create_engine(self, **engine_kwargs: Any) -> OmniEngineBase:
         """Construct this entrypoint's engine (``AsyncOmniEngine`` for turn-based use)."""
-        raise NotImplementedError
+        raise NotImplementedError # 子类必须实现
 
     @property
     def num_stages(self) -> int:
@@ -333,35 +335,41 @@ class OmniBase(PDDisaggregationMixin):
             if self._stage_has_no_live_replica(pool):
                 raise EngineDeadError(f"Stage-{pool.stage_id} has no live replica")
 
+    # 获取采样参数
     def resolve_sampling_params_list(
         self,
         sampling_params_list: Sequence[Any] | Any | None,
         allow_delta_coercion: bool = False,
     ) -> Sequence[Any]:
         """Resolve request parameters; pipeline sampling constraints override caller values."""
+
+        # 获取采样参数
         normalized: Sequence[Any]
         if sampling_params_list is None:
-            normalized = self.default_sampling_params_list
+            normalized = self.default_sampling_params_list # 获取engine提供的默认采样参数列表
             # Set the output kind to delta since no params were specified
-            if allow_delta_coercion:
+            if allow_delta_coercion: # 把默认采样参数改造为流式输出模型
                 normalized = coerce_param_message_types(list(normalized), is_streaming=True)
-
         elif isinstance(sampling_params_list, Sequence) and not isinstance(sampling_params_list, (str, bytes)):
             normalized = sampling_params_list
         elif self.num_stages == 1:
             normalized = [sampling_params_list]
         else:
             raise ValueError(f"Expected {self.num_stages} sampling params, got a single sampling params object")
-        if len(normalized) != self.num_stages:
+        
+        if len(normalized) != self.num_stages: # 校验参数数量，有多少stage就需要有多少采样参数
             raise ValueError(f"Expected {self.num_stages} sampling params, got {len(normalized)}")
 
         # Streaming coercion may also change a constrained output kind in
         # the defaults (for example, an internal TTS stage's FINAL_ONLY).
+        # 每个 stage 的"规章制度"（constraints）是红线，
+        # 以stage内部规定“红线”参数为准,做一道防线
         if sampling_params_list is not None or allow_delta_coercion:
             normalized = [
                 self._apply_sampling_constraints(params, constraints)
                 for params, constraints in zip(normalized, self.sampling_constraints_list, strict=True)
             ]
+
         return normalized
 
     @staticmethod

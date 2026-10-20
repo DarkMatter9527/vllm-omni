@@ -1027,7 +1027,11 @@ class StagePool:
         expected_replica_id: int | None = None,
     ) -> int:
         """Submit a stage-entry request into this pool."""
-        params = params_override if params_override is not None else req_state.sampling_params_list[self.stage_id]
+        """
+        第一, 从stage0中挑选一个replica
+        第二, RPC调用把请求跨进程发送给stage0子进程
+        """
+        params = params_override if params_override is not None else req_state.sampling_params_list[self.stage_id] # 获得采样参数
         # Direct engine callers may provide plain vLLM SamplingParams.
         if self.stage_type == "diffusion":
             params = OmniDiffusionSamplingParams.from_params(params)
@@ -1049,22 +1053,25 @@ class StagePool:
             await client.add_request_async(request_id, request, params, **submit_kwargs)
             return replica_id
 
-        replica_id = await self._pick_or_select(
+        """
+        1. 挑选一个replica
+        """
+        replica_id = await self._pick_or_select( # _pick_or_select = "挑工位" ：单机挑最闲的，多机先看有没有之前绑定过的工位（缓存命中优先），没有再从全局里挑
             request_id,
             affinity_request_id=affinity_request_id,
         )
         # A request whose multimodal cache keys name a replica must not move: that
         # replica's sender-cache entries may omit media the new one never received.
-        if expected_replica_id is not None and replica_id != expected_replica_id:
+        if expected_replica_id is not None and replica_id != expected_replica_id: # 和预选副本不一致的，就判死请求
             self.release_binding(request_id)
             raise StageUnavailableError(
                 f"stage {self.stage_id} replica {expected_replica_id} keyed by {request_id} became "
                 "unavailable before submit"
             )
-        if self.clients[replica_id] is None:
+        if self.clients[replica_id] is None: # 检验副本有没有注册到客户端中(启动时就已经分配了副本槽位，stage子进程陆续启动、注册自己的客户端)
             raise StageUnavailableError(f"stage {self.stage_id} replica {replica_id} is not attached")
         try:
-            self.output_processor.add_request(
+            self.output_processor.add_request( # 登记request_id和prompt的对应关系
                 request=request,
                 prompt=prompt_text,
                 parent_req=None,
@@ -1076,7 +1083,10 @@ class StagePool:
             raise
 
         try:
-            await self._llm_client(replica_id).add_request_async(request, **submit_kwargs)
+            """
+            2. RPC投递,把请求发送给stage子进程
+            """
+            await self._llm_client(replica_id).add_request_async(request, **submit_kwargs) 
         except BaseException:
             # Sending can fail or be cancelled after the engine accepted the
             # request. Abort while its replica binding is still available.

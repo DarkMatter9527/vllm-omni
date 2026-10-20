@@ -269,6 +269,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         self.use_async_omni_output = True
         self.eager_omni_postprocess_before_async_output = True
         self.omni_pooler_payload_include_hidden = False
+        # 只是改写了注意力层的实现，其他所有部分都是复用qwen2的
         self.model = Qwen3Model(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
 
         if get_pp_group().is_last_rank:
@@ -511,7 +512,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         logits = self.logits_processor(self.lm_head, hidden_states)
         if logits is None:
             return None
-
+        # 但 talker 的词表很大（`talker_config.vocab_size` ），里面 不全是音频 token ，还有普通文本 token 之类。而这一阶段只应该吐出 codec 音频 id
         # Prompt logprobs share this entry point with sampling, so preserve
         # the codec vocabulary mask even when the fused sampler is installed.
         logits = logits.masked_fill(self._codec_disallowed_mask, float("-inf"))
@@ -785,9 +786,11 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         self,
         input_ids: torch.Tensor,
         input_embeds: torch.Tensor | None,
-        **info_dict: Any,
+        **info_dict: Any, # 文本、指令等信息
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         # Metadata may be passed flattened or under `additional_information`; normalize to flattened keys.
+        # 返回的`input_ids` 在 prefill 时是"长度占位符"，在 decode 时是"上一帧的 codec layer-0"
+        
         additional_information = info_dict.get("additional_information")
         if isinstance(additional_information, dict):
             merged: dict[str, Any] = {k: v for k, v in info_dict.items() if k != "additional_information"}
@@ -800,9 +803,11 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         hs = payload.get("hidden_states", {})
         meta = payload.get("meta", {})
 
-        span_len = int(input_ids.shape[0])
+        span_len = int(input_ids.shape[0])  
         if span_len <= 0:
             return input_ids, input_embeds if input_embeds is not None else self.embed_input_ids(input_ids), {}
+        
+        # 判断是处于哪一个阶段，是prefill还是decode
         is_prefill_raw = info_dict.get("_omni_is_prefill")
         if isinstance(is_prefill_raw, bool):
             is_prefill = is_prefill_raw
@@ -812,11 +817,12 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             except Exception:
                 is_prefill = span_len > 1
 
+        # 判断有无tts合成时所需的文本
         if not _has_tts_text_conditioning(info_dict, hs):
             raise ValueError("Missing Qwen3-TTS text conditioning: provide `text` or precomputed text token ids.")
 
         task_type = (info_dict.get("task_type") or ["CustomVoice"])[0]
-        codec_streaming = self._codec_streaming_flag(meta, task_type)
+        codec_streaming = self._codec_streaming_flag(meta, task_type) # 非流式输出
 
         # ``tts_pad_embed`` is a request-independent constant — see
         # :meth:`_init_runtime_buffers`. Materialize once on the right
@@ -824,7 +830,8 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         # and the decode text-step fallback below.
         dtype = self._embedding_dtype
         tts_pad_embed = self._tts_pad_embed.to(device=input_ids.device, dtype=dtype).reshape(1, -1)
-
+        
+        # prefill分支
         if is_prefill:
             # Prefill (prompt embeddings)
             prompt_embeds_buffer = embed.get("prefill")
@@ -892,6 +899,13 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
                 input_ids_out = torch.full_like(input_ids, int(self.talker_config.codec_pad_id))
 
             info_update.setdefault("codes", {})["audio"] = self._zero_codes(prompt_embeds.shape[0], input_ids.device)
+            """
+            返回input_id值，prefill分支的输入embedding，info_update包含meta信息，如codec_streaming、codec_frame_valid等
+            
+            Prefill 分支 ：返回的`input_ids_out` 被填成`codec_pad_id` （ L890 ），
+            是 占位值 ——因为这些位置的 embedding 已被`prompt_embeds` 覆盖，token id 本身无意义，
+            但必须是 in-vocab 合法值，供 vLLM 做内部 bookkeeping（记录 num_computed_tokens、判断 prefill 完成等）
+            """
             return input_ids_out, prompt_embeds, info_update
 
         if span_len > 1:
@@ -911,19 +925,31 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
                 },
             )
 
+        # 下面是decode分支
         # Decode: span_len == 1
         # Pop one text-step vector from tailing_text_hidden queue.
         # ``tts_pad_embed`` was materialized above from :attr:`_tts_pad_embed`
         # (request-independent buffer) — no per-request fetch needed.
 
-        tail = hs.get("trailing_text")
+        """
+        tail = [T待逐帧消费的文本 token 数量 + 1（eos 标记）, hidden] 文本侧 embedding 队列
+        Qwen3-TTS 的每一步 codec 解码都需要"知道当前在念哪个文本 token"。
+        下面的`text_step` 就是该帧对应的文本 embedding
+
+        - `T = 剩余文本 token 数 + 1（eos）`
+        例如文本"你好世界"被 tokenize 成 10 个 token，去掉首尾控制后剩 6 个文本 token，
+        prefill 消费第 1 个，则`T = 5 + 1 = 6` ，对应 decode 阶段要生成 6 帧 codec。
+
+        一句话 ：`T` 就是 decode 阶段需要生成的 codec 帧数（= 还要念的文本 token 数 + 结束帧）
+        """
+        tail = hs.get("trailing_text") 
         text_offset = max(0, int(meta.get("talker_text_offset", 0) or 0))
         trailing_text_update = None
         if isinstance(tail, torch.Tensor) and tail.ndim == 2:
             tail_len = int(tail.shape[0])
             if text_offset < tail_len:
                 text_step = (
-                    tail[text_offset : text_offset + 1]
+                    tail[text_offset : text_offset + 1] # 弹出 1 个 [1, hidden]
                     .to(
                         device=input_ids.device,
                         dtype=dtype,
@@ -974,6 +1000,13 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         }
         if trailing_text_update is not None:
             info_update["hidden_states"] = {"trailing_text": trailing_text_update.detach()}
+        """
+        返回input_id值，decode嵌入向量，info_update包含meta信息，如codec_streaming、codec_frame_valid等
+        
+        Decode 分支 ：返回的`input_ids` 是 真实的上一步采样值 （layer-0 codec id），
+        在 L960 用来查`codec_embedding` 得到`last_id_hidden` ，
+        再与`text_step` 相加构成当前步的`inputs_embeds`
+        """
         return input_ids, inputs_embeds_out, info_update
 
     def preprocess_decode_batch(
@@ -1137,6 +1170,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         wrapped = Qwen3TTSTalkerSampler(sampler, self)
         return (wrapped, None) if wrapped.enabled else None
 
+    # 把本步最后一个 token 的 hidden 向量存下来，供 下一步 解码使用
     def postprocess(self, hidden_states: torch.Tensor, **_: Any) -> dict[str, Any]:
         # Keep the last token hidden for the next decode step's code predictor.
         # Stays on GPU - gpu_resident_buffer_keys avoids the CPU round-trip.

@@ -220,7 +220,16 @@ class AsyncOmniEngine(OmniEngineBase):
         message_type: Literal["add_request", "streaming_update"] = "add_request",
         entry_stage_id: int = 0,
     ) -> StageSubmissionMessage:
-        """Build an add_request message after stage-0 preprocessing."""
+        """
+        Build an add_request message after stage-0 preprocessing.
+
+        补齐采样参数:如果采样参数为`None` ，就使用引擎默认值；如果为空，就报错。同时取出 Stage0 对应的参数，供后续 tokenize 使用
+        注入请求身份:把`request_id` 写进 prompt（`global_request_id` ），确保下游 stage 能据此对应同一请求
+        执行prompt变换:调用`prompt_transform_func` 进行改写（例如 TTS 的文本模板）
+        对stage0进行输入预处理:通过`input_processor.process_inputs` 完成 tokenize 和多模态处理，并把结果包装成`OmniEngineCoreRequest` ，同时记录预处理耗时、绑定的 replica 等信息
+
+        最终返回一个`StageSubmissionMessage` ，再由 add_request 把它放入`request_queue` ，交给 Orchestrator
+        """
         request_timestamp = float(arrival_time) if arrival_time is not None else time.time()
         effective_sampling_params_list: list[OmniSamplingParams] = (
             list(cast(Sequence[OmniSamplingParams], sampling_params_list))
@@ -499,8 +508,11 @@ class AsyncOmniEngine(OmniEngineBase):
         processor registration happen here in the caller's thread, avoiding
         a queue + coroutine-switch round-trip.  The Orchestrator receives a
         ready-to-submit OmniEngineCoreRequest.
+
+        将请求添加到请求队列中
         """
-        try:
+        try: 
+            # 把用户的原始输入整理成一条可以直接提交给 Orchestrator 的请求消息，不执行推理
             msg = self._build_add_request_message(
                 request_id=request_id,
                 prompt=prompt,
@@ -540,17 +552,21 @@ class AsyncOmniEngine(OmniEngineBase):
                     companions = self._build_cfg_companions(
                         request_id, msg.original_prompt, stage0_params, effective_spl
                     )
-
-            self.request_queue.sync_q.put(msg)
+            """ 1. 将请求添加入队列中 """
+            self.request_queue.sync_q.put(msg) # 将请求交给Orchestrator的入口
         except BaseException:
             for artifact_dir in msg.request_artifact_dirs or ():
                 shutil.rmtree(artifact_dir, ignore_errors=True)
             raise
         finally:
+            # `original_prompt是用户传入的原始对象的引用（不是副本），处理过程中框架会往里塞一个内部 key`REQUEST_ARTIFACT_DIRS_KEY（临时产物目录列表）。
+            # 这两行把它 pop 掉，确保用户拿到的 prompt 和传入时一致。
             if isinstance(msg.original_prompt, dict):
                 msg.original_prompt.pop(REQUEST_ARTIFACT_DIRS_KEY, None)
+
         for companion in companions:
             self.request_queue.sync_q.put(companion)
+
         if companions:
             logger.info(
                 "[AsyncOmniEngine] CFG expansion for req %s: %d companions",

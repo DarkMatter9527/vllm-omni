@@ -82,6 +82,10 @@ def _filter_mrope_kwargs_for_model(model: object, kwargs: dict[str, Any]) -> dic
 
 
 class OmniGPUModelRunner(PrefixCacheRunnerMixin, GPUModelRunner):
+    """
+    只负责编排流程 ：组 batch、KV cache、attention metadata、按固定顺序调用模型的 hook、采样、把结果塞给下游 stage
+    """
+
     intermediate_tensors: IntermediateTensors | None
 
     def __init__(self, *args, **kwargs):
@@ -1694,6 +1698,9 @@ class OmniGPUModelRunner(PrefixCacheRunnerMixin, GPUModelRunner):
             always go through the omni-specific ``model.preprocess`` /
             ``has_preprocess`` code path below, so the upstream change is
             deliberately not ported.
+
+
+        vllm同名方法的Omni覆盖,用于把调度去给出的 请求+token_ids翻译成GPU上拍好的input_ids/input_mebeds,再交给后面的model_forward
         """
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         is_first_rank = get_pp_group().is_first_rank

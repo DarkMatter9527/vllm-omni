@@ -564,14 +564,15 @@ class OrchestratorBase:
                 await asyncio.gather(*pending, return_exceptions=True)
 
     # ---- Request handling ----
-
+ 
     async def _request_handler(self) -> None:
         """Read messages from the main thread via request_async_queue."""
+        """ 1. 异步独立进程, 循环尝试获取请求"""
         while True:
-            msg = await self.request_async_queue.get()
+            msg = await self.request_async_queue.get() # 获取消息，并从队列中弹掉
             msg_type = msg.type
 
-            if await self._dispatch_message(msg):
+            if await self._dispatch_message(msg): # 路由分发
                 continue
             if msg_type == "abort":
                 await self._handle_abort(msg)
@@ -601,7 +602,7 @@ class OrchestratorBase:
                 logger.warning("[Orchestrator] Unknown message type: %s", msg_type)
 
     # ---- Template seams filled by the turn-based / duplex subclasses ----
-
+    # 这里的_dispatch_message是用来占位的，是基类中的方法，子类在下面重写了这个方法，ctrl+鼠标左键导错了
     async def _dispatch_message(self, msg: EngineQueueMessage) -> bool:
         """Handle a subclass-specific request-queue message; return True when consumed."""
         del msg
@@ -1416,8 +1417,16 @@ class OrchestratorBase:
                 cleanup.append(pending_get)
             await asyncio.gather(*cleanup, return_exceptions=True)
 
+    # orchestrator的中枢功能，接住上一站的产出，分发给下一站或客户端
     async def _handle_processed_outputs(self, stage_id: int, replica_id: int, outputs: list[Any]) -> None:
         """Route processed stage outputs produced by one stage poll."""
+        """
+        函数里对每份 output 依次做：
+        1. 校验请求存在 — req_state 找不到就丢弃（可能已被 abort）
+        2. 错误分流 — output 带 error 则交给`_handle_stage_error`
+        3. 计算指标 — 如果 output.finished 或 streaming 段结束，构建该 stage 的性能数据
+        4. 统一路由 — 调`_route_output` 决定是 forward 给下一个 stage，还是塞进 output_queue 回主进程
+        """
         pool = self.stage_pools[stage_id]
         for output in outputs:
             req_state = self.request_states.get(output.request_id)
@@ -3344,7 +3353,10 @@ class Orchestrator(OrchestratorBase):
             await asyncio.gather(consumer, shutdown, return_exceptions=True)
 
     async def _dispatch_message(self, msg: EngineQueueMessage) -> bool:
+        """ orchestrator核心路由功能 """
+
         msg_type = msg.type
+        """ 1. 获取请求后进行路由分发"""
         if msg_type == "add_request":
             await self._handle_add_request(msg)
         elif msg_type == "streaming_update":
@@ -3384,17 +3396,21 @@ class Orchestrator(OrchestratorBase):
         return None
 
     async def _handle_add_request(self, msg: StageSubmissionMessage) -> None:
-        """Handle an add_request message from the main thread."""
+        """
+        Handle an add_request message from the main thread.
+        
+        orchestrator发送请求的核心逻辑
+        """
         stage_id = msg.entry_stage_id
         request_id = msg.request_id
         prompt = msg.prompt
-        original_prompt = msg.original_prompt
+        original_prompt = msg.original_prompt # 原来的输入和指令信息
         sampling_params_list = msg.sampling_params_list
         if not sampling_params_list:
             raise ValueError(f"Missing sampling params for stage 0. Got {len(sampling_params_list)} stage params.")
         final_stage_id = msg.final_stage_id
         final_output_stage_ids = set(msg.final_output_stage_ids or [final_stage_id])
-
+        # 检查入口有没有还活着的副本，没有就直接把请求判死，不往死进程上投
         if not self.stage_pools[stage_id].live_replica_ids():
             # The entry stage lost all replicas between the HTTP-layer errored check and
             # dispatch. Runs before request state / running counter registration,
@@ -3402,7 +3418,7 @@ class Orchestrator(OrchestratorBase):
             await self._fail_request_dead_stage(request_id, stage_id)
             return
 
-        if getattr(prompt, "resumable", False):
+        if getattr(prompt, "resumable", False): # 这是提交前的"兼容性体检" ——请求还没投出去，先看它能不能被整个pipeline接住
             mrv2_stage_id = self._native_mrv2_receiver_stage(final_stage_id)
             if mrv2_stage_id is not None:
                 # Streaming-input sessions replace downstream prompts through
@@ -3427,7 +3443,7 @@ class Orchestrator(OrchestratorBase):
             final_stage_id,
             len(sampling_params_list),
         )
-
+        # 记录请求状态信息
         req_state = OrchestratorRequestState(
             request_id=request_id,
             prompt=original_prompt,
@@ -3440,8 +3456,8 @@ class Orchestrator(OrchestratorBase):
             request_artifact_dirs=set(msg.request_artifact_dirs or ()),
         )
         self.request_states[request_id] = req_state
-        self._maybe_attach_native_kv_transfer_params(req_state, prompt)
-        self._register_running_request(req_state)
+        self._maybe_attach_native_kv_transfer_params(req_state, prompt) # 如果是PD分离或跨DP rank场景，把KV cache跨stage/rank搬运需要的参数挂到req_state上，后面Stage forward时用
+        self._register_running_request(req_state) # 把req_state放进orchestrator的全局active_requests表
         req_state.streaming.enabled = bool(getattr(prompt, "resumable", False))
         enqueue_ts = msg.enqueue_ts
         if enqueue_ts > 0:
@@ -3449,53 +3465,63 @@ class Orchestrator(OrchestratorBase):
         preprocess_ms = msg.preprocess_ms
         if preprocess_ms > 0:
             req_state.pipeline_timings["preprocess_ms"] = preprocess_ms
-        input_guard = self._stage_input_submission(stage_id) if stage_id != 0 else nullcontext()
-        async with input_guard as mark_submitting:
+
+        input_guard = self._stage_input_submission(stage_id) if stage_id != 0 else nullcontext() # 获取一个"递交输入"的上下文管理器，用来控制向非入口stage提交请求的节奏
+        async with input_guard as mark_submitting: # 拿到准备好的锁，控制并发
             expected_replica_id = None
-            if stage_id != 0:
+            """
+            主进程async_omni_engine._build_add_request_message已经做完
+            orchestrator拿到的prompt已经是tokenize好的OmniEngineCoreRequest
+
+            下游输入格式取决于上游输出(比如Stage0输出codec token,Stage1要把token当输入)
+            只有orchestrator知道stage间的适配规则,中就由orchestrator代劳进行数据转换
+            """
+            if stage_id != 0: 
                 _t_preprocess = _time.perf_counter()
                 try:
-                    expected_replica_id = self._preselect_stage_mm_cache_replica(request_id, stage_id, prompt)
-                    prompt = await self._build_entry_stage_request(
+                    expected_replica_id = self._preselect_stage_mm_cache_replica(request_id, stage_id, prompt) # 有多个副本的时候,挑一个多模态缓存命中的(比如请求里的音色特征之前算过，落在这个副本上）,减少重复计算
+                    prompt = await self._build_entry_stage_request( 
                         request_id,
                         stage_id,
                         prompt,
                         req_state,
                         lora_request=msg.lora_request,
                         replica_id=expected_replica_id,
-                    )
-                except StageUnavailableError:
-                    await self._fail_request_dead_stage(request_id, stage_id)
+                    ) # 把Stage0输出的codec token，包装成Stage1能吃的OmniEngineCoreRequest（就像把零件装成整机，递给下一个车间
+                except StageUnavailableError: # Stage1 突然挂了 → 判死请求，清理缓存
+                    await self._fail_request_dead_stage(request_id, stage_id) 
                     return
-                except (ValueError, VLLMClientError) as exc:
+                except (ValueError, VLLMClientError) as exc: # Stage1拒绝了这份包装（比如 token 长度超了）→ 客户端错误，清缓存
                     await asyncio.to_thread(self._clear_stage_input_cache, stage_id)
                     # Rejected input fails only this request, as at stage 0.
                     logger.warning("[Orchestrator] req=%s: stage-%s rejected the prompt: %s", request_id, stage_id, exc)
                     await self._fail_request_client_error(request_id, stage_id, str(exc))
                     return
-                if self.request_states.get(request_id) is not req_state:
+                if self.request_states.get(request_id) is not req_state: # 并发abort(主动撤销一个正在处理中的请求)了这个请求 → 让它在中途某站直接废弃，不再往后 stage 走，也不再返回结果
                     await asyncio.to_thread(self._clear_stage_input_cache, stage_id)
                     return
                 req_state.pipeline_timings["preprocess_ms"] = (_time.perf_counter() - _t_preprocess) * 1000.0
-            req_state.stage_submit_ts[stage_id] = _time.time()
+            req_state.stage_submit_ts[stage_id] = _time.time() # 记录预处理花了多久（后面看性能瓶颈用)
             if mark_submitting is not None:
-                mark_submitting()
-            if not await self._dispatch_or_fail_request(
+                mark_submitting() # 标注stage的数据已经打包好，准备通过共享内存发送过去，不能够清理共享内存
+
+            """ self._dispatch_or_fail_request“内部”把请求到stage 并返回是否成功的标志,并且失败了也在内部进行处理就进行处理"""
+            if not await self._dispatch_or_fail_request( # 
                 lambda: self.stage_pools[stage_id].submit_initial(
                     request_id,
                     req_state,
                     prompt,
                     prompt_text=msg.output_prompt_text,
                     expected_replica_id=expected_replica_id,
-                ),
+                ), # 返回副本 ID
                 req_id=request_id,
                 stage_id=stage_id,
                 operation="add_request",
-            ):
-                if stage_id != 0:
+            ): 
+                if stage_id != 0: # 投递失败后的"善后清理":如果是 Stage1+ 已经打包好的 SHM 货物，必须手动清掉（不然没人读就成内存泄漏）；Stage0 不用管，主进程的 finally 已经清过了
                     await asyncio.to_thread(self._clear_stage_input_cache, stage_id)
                 return
-
+        # async-chunk 模式下，在 Stage0 刚投递时就给下游 Stage 提前挂号+预热，让流水线尽早转起来，避免上游全跑完才唤醒下游的时间差
         if self.async_chunk and final_stage_id > stage_id:
             await self._prewarm_async_chunk_stages(request_id, prompt, req_state, attach_prewarm_payload=True)
 

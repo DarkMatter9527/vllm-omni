@@ -1,0 +1,75 @@
+# Qwen3-TTS 单步调试专用 deploy 配置
+# 由 vllm_omni/deploy/qwen3_tts.yaml 派生，只做"让 Python 逐行执行"的必要改动：
+#   1. model_runner: v1   —— 关掉实验性的 MRV2
+#   2. enforce_eager 全开  —— 两 stage 都关 CUDA Graph / torch.compile
+#   3. async_chunk: false —— 链路更线性，便于单步跟读
+# 硬件：单卡 RTX 3060 Laptop 6GB，使用 Qwen3-TTS-12Hz-0.6B-CustomVoice。
+# 已在 6GB 卡上端到端跑通并生成音频。
+model_runner: v1
+async_chunk: false
+
+connectors:
+  connector_of_shared_memory:
+    name: SharedMemoryConnector
+    extra:
+      talker_first_audio: true
+      codec_streaming: true
+      connector_get_sleep_s: 0.01
+      connector_get_max_wait_first_chunk: 3000
+      connector_get_max_wait: 300
+      codec_chunk_frames: 25
+      codec_left_context_frames: 72
+      initial_codec_chunk_frames: 1
+      decode_batch_max_size: 1
+
+stages:
+  - stage_id: 0
+    # 调试用单请求；生产为 64
+    max_num_seqs: 1
+    # 6GB 卡：talker 权重约 1.91 GiB，0.35 配额只剩 0.14 GiB KV 不够 4096 len，
+    # 提到 0.5 才有约 1.1 GiB KV 可用
+    gpu_memory_utilization: 0.5
+    trust_remote_code: true
+    # 调试关键项
+    enforce_eager: true
+    enable_prefix_caching: false
+    async_scheduling: false
+    max_num_batched_tokens: 512
+    max_model_len: 4096
+    devices: "0"
+    output_connectors:
+      to_stage_1: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.9
+      top_k: 50
+      max_tokens: 4096
+      min_tokens: 2
+      repetition_penalty: 1.05
+    silence_ban_frames: 0
+    subtalker_sampling_params:
+      do_sample: true
+      temperature: 0.9
+      top_k: 50
+      top_p: 1.0
+
+  - stage_id: 1
+    dtype: bfloat16
+    max_num_seqs: 1
+    gpu_memory_utilization: 0.3
+    # 调试关键项：生产为 false
+    enforce_eager: true
+    trust_remote_code: true
+    enable_prefix_caching: false
+    async_scheduling: false
+    max_num_batched_tokens: 4096
+    # 生产为 65536（要覆盖长语音的累计 codec 流）。6GB 卡放不下，调试用短句退回 16384
+    max_model_len: 16384
+    devices: "0"
+    input_connectors:
+      from_stage_0: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 65536
+      repetition_penalty: 1.0

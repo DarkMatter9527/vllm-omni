@@ -326,6 +326,7 @@ class OmniEngineBase:
         # Launch orchestrator background thread
         startup_future: concurrent.futures.Future = concurrent.futures.Future()
 
+        """ 创建了独立orchestrator线程:跑着一个永不退出的 asyncio 事件循环 """
         self.orchestrator_thread = threading.Thread(
             target=self._bootstrap_orchestrator,
             args=(
@@ -336,6 +337,8 @@ class OmniEngineBase:
             name="orchestrator",
         )
         self.orchestrator_thread.start()
+
+
         self._wait_for_orchestrator_init(startup_future, startup_timeout)
         self._correlated_rpc_client = CorrelatedRpcClient(
             self.request_queue.sync_q,
@@ -476,7 +479,7 @@ class OmniEngineBase:
             membership_controller = self._runtime.create_membership_controller()
 
             orchestrator = self._create_orchestrator(
-                request_async_queue=self.request_queue.async_q,
+                request_async_queue=self.request_queue.async_q, # 把请求队列交给orchestrator中的异步请求队列
                 output_async_queue=self._output_sink,
                 rpc_async_queue=self.rpc_output_queue.async_q,
                 stage_pools=self.stage_pools,

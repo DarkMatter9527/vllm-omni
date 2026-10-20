@@ -17,6 +17,10 @@ import soundfile as sf
 import torch
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
 from vllm_omni import AsyncOmni, Omni
 from vllm_omni.utils.tracking_parser import TrackingArgumentParser
@@ -41,6 +45,14 @@ def _estimate_prompt_len(
     The AR Talker replaces all input embeddings via ``preprocess``, so the
     placeholder values are irrelevant but the **length** must match the
     embeddings that ``preprocess`` will produce.
+
+    talker的输入embedding不是由prompt_token_ids查表得到的,而是在preprocess里面根据
+    additional_information(text、speaker、instruct等)动态构建的(从qwen3_tts_talker.py:784的
+    prefill分支中构建直接产出[prompt_len, hidden_size]的embedding矩阵)
+
+    vllm调度器任然需要prompt_token_ids的长度来分配KV cahe大小,batch凭借,判断prefil是否完成
+
+
     """
     try:
         from vllm_omni.model_executor.models.qwen3_tts.configuration_qwen3_tts import Qwen3TTSConfig
@@ -55,7 +67,7 @@ def _estimate_prompt_len(
             cfg = Qwen3TTSConfig.from_pretrained(model_name, trust_remote_code=True)
 
             # Load speech tokenizer (codec encoder) for exact ref_code_len.
-            speech_tok = None
+            speech_tok = None # 声音编码器
             try:
                 import os
 
@@ -71,7 +83,7 @@ def _estimate_prompt_len(
                     logger.info("Loaded speech tokenizer for exact ref_code_len estimation")
             except Exception as e:
                 logger.debug("Could not load speech tokenizer: %s", e)
-
+            # 分词器、模型配置、声音编码器
             _cache[model_name] = (tok, getattr(cfg, "talker_config", None), speech_tok)
 
         tok, tcfg, speech_tok = _cache[model_name]
@@ -81,6 +93,7 @@ def _estimate_prompt_len(
             """Encode ref_audio with the actual codec to get exact frame count."""
             if not isinstance(ref_audio, (str, list)):
                 return None
+            # 从additional_information中获取ref_audio
             audio_path = ref_audio[0] if isinstance(ref_audio, list) else ref_audio
             if not isinstance(audio_path, str) or not audio_path.strip():
                 return None
@@ -125,18 +138,18 @@ def _estimate_prompt_len(
             except Exception:
                 return None
 
+        # 
         return Qwen3TTSPromptEmbedsBuilder.estimate_prompt_len_from_additional_information(
             additional_information=additional_information,
-            task_type=task_type,
-            tokenize_prompt=lambda t: tok(t, padding=False)["input_ids"],
-            codec_language_id=getattr(tcfg, "codec_language_id", None),
-            spk_is_dialect=getattr(tcfg, "spk_is_dialect", None),
+            task_type=task_type, # 任务类型
+            tokenize_prompt=lambda t: tok(t, padding=False)["input_ids"], # 分词器处理函数，得到input_ids值
+            codec_language_id=getattr(tcfg, "codec_language_id", None), # 编码器语言ID
+            spk_is_dialect=getattr(tcfg, "spk_is_dialect", None), # 是否是方言
             estimate_ref_code_len=_estimate_ref_code_len,
         )
     except Exception as exc:
         logger.warning("Failed to estimate prompt length, using fallback 2048: %s", exc)
         return 2048
-
 
 def get_custom_voice_query(use_batch_sample: bool = False) -> QueryResult:
     """Build CustomVoice sample inputs.
@@ -146,10 +159,13 @@ def get_custom_voice_query(use_batch_sample: bool = False) -> QueryResult:
 
     Returns:
         QueryResult with Omni inputs and the CustomVoice model path.
+
+    打包原始输入文本、指令等信息
     """
     task_type = "CustomVoice"
-    model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
-    if use_batch_sample:
+    model_name = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+
+    if use_batch_sample: # 默认不走batch，debug测试只走一条
         texts = [
             "其实我真的有发现，我是一个特别善于观察别人情绪的人。",
             "She said she would be here by noon.",
@@ -162,6 +178,7 @@ def get_custom_voice_query(use_batch_sample: bool = False) -> QueryResult:
         speakers = ["Vivian", "Ryan", "Ryan", "Ryan", "Ryan"]
         inputs = []
         for text, instruct, language, speaker in zip(texts, instructs, languages, speakers):
+            # addtional_information是相关信息打包、总览
             additional_information = {
                 "task_type": [task_type],
                 "text": [text],
@@ -180,10 +197,13 @@ def get_custom_voice_query(use_batch_sample: bool = False) -> QueryResult:
                 }
             )
     else:
-        text = "其实我真的有发现，我是一个特别善于观察别人情绪的人。"
+        # text = "其实我真的有发现，我是一个特别善于观察别人情绪的人。"
+        text = "哥哥，你回来啦，人家等了你好久好久了，要抱抱！"
         language = "Chinese"
         speaker = "Vivian"
         instruct = "用特别愤怒的语气说"
+        # instruct = "体现撒娇稚嫩的萝莉女声，音调偏高且起伏明显，营造出黏人、做作又刻意卖萌的听觉效果。"
+        # 信息打包
         additional_information = {
             "task_type": [task_type],
             "text": [text],
@@ -193,13 +213,14 @@ def get_custom_voice_query(use_batch_sample: bool = False) -> QueryResult:
             "max_new_tokens": [2048],
             "full_utterance_decode": [True],
         }
+
         inputs = {
-            "prompt_token_ids": [0] * _estimate_prompt_len(additional_information, model_name),
-            "additional_information": additional_information,
+            "prompt_token_ids": [0] * _estimate_prompt_len(additional_information, model_name), # 占位符，用于分配KV Cache
+            "additional_information": additional_information, # 文本、指令信息
         }
     return QueryResult(
-        inputs=inputs,
-        model_name=model_name,
+        inputs=inputs, # 占位信息和输入信息(列表嵌套字典)
+        model_name=model_name, # 模型类型
     )
 
 
@@ -335,7 +356,6 @@ query_map = {
     "Base": get_base_query,
 }
 
-
 def _build_inputs(args) -> tuple[str, list]:
     """Resolve model name and inputs list from CLI args."""
     if args.batch_size < 1 or (args.batch_size & (args.batch_size - 1)) != 0:
@@ -345,7 +365,7 @@ def _build_inputs(args) -> tuple[str, list]:
             "of Code2Wav."
         )
 
-    query_func = query_map[args.query_type]
+    query_func = query_map[args.query_type] # 通过映射字典找到封装query方法
     if args.query_type in {"CustomVoice", "VoiceDesign"}:
         query_result = query_func(use_batch_sample=args.use_batch_sample)
     elif args.query_type == "Base":
@@ -355,7 +375,7 @@ def _build_inputs(args) -> tuple[str, list]:
 
     model_name = query_result.model_name
 
-    if args.txt_prompts:
+    if args.txt_prompts: # 只用一条测试用例，不需要txt prompt文件
         with open(args.txt_prompts) as f:
             lines = [line.strip() for line in f if line.strip()]
         if not lines:
@@ -363,46 +383,65 @@ def _build_inputs(args) -> tuple[str, list]:
         template = query_result.inputs if not isinstance(query_result.inputs, list) else query_result.inputs[0]
         template_info = template["additional_information"]
         inputs = [
-            {
+            {       
+                # estimate_prompt_len = 文本token数 + 参考音频codec帧数 + 指令tag预留的总和，prompt embeds最终会有多少行"的精确估算
+                # 用于分配 KV Cache 大小（行数 × hidden；batch 拼接时算对齐；判断 prefill 阶段什么时候结束、进入 decode
                 "prompt_token_ids": [0] * _estimate_prompt_len({**template_info, "text": [t]}, model_name),
+                
                 "additional_information": {**template_info, "text": [t]},
             }
             for t in lines
         ]
     else:
-        inputs = query_result.inputs if isinstance(query_result.inputs, list) else [query_result.inputs]
+        inputs = query_result.inputs if isinstance(query_result.inputs, list) else [query_result.inputs] # 包装为list
 
-    return model_name, inputs
+    return model_name, inputs # 返回模型名称和
 
 
 def _save_wav(output_dir: str, request_id: str, mm: dict) -> None:
     """Concatenate audio chunks and write to a wav file."""
-    audio_data = mm["audio"]
-    sr_raw = mm["sr"]
+    audio_data = mm["audio"] # 音频波形张量
+    sr_raw = mm["sr"] # 采样率
     sr_val = sr_raw[-1] if isinstance(sr_raw, list) and sr_raw else sr_raw
     sr = sr_val.item() if hasattr(sr_val, "item") else int(sr_val)
-    audio_tensor = torch.cat(audio_data, dim=-1) if isinstance(audio_data, list) else audio_data
+    audio_tensor = torch.cat(audio_data, dim=-1) if isinstance(audio_data, list) else audio_data # 如果是流式解码就可能是一个chunck列表
     out_wav = os.path.join(output_dir, f"output_{request_id}.wav")
-    sf.write(out_wav, audio_tensor.float().cpu().numpy().flatten(), samplerate=sr, format="WAV")
+    sf.write(out_wav, audio_tensor.float().cpu().numpy().flatten(), samplerate=sr, format="WAV") # 把模型输出的音频张量保存为 WAV 文
     logger.info(f"Request ID: {request_id}, Saved audio to {out_wav}")
 
-
+# 非流式主逻辑
 def main(args):
     """Run offline inference with Omni."""
-    model_name, inputs = _build_inputs(args)
-    output_dir = args.output_dir
+    model_name, inputs = _build_inputs(args) # 模型名称、输入信息(占位信息,输入文本和指令)
+
+    output_dir = args.output_dir # 输出路径
     os.makedirs(output_dir, exist_ok=True)
 
-    omni_kwargs = vars(args).copy()
+    # 实例化omni，启动omni框架
+    omni_kwargs = vars(args).copy() # 转成字典
     # Override CLI --model with the derived model_name.
     omni_kwargs["model"] = model_name
-    omni = Omni(**omni_kwargs)
-
+    # 调试用：放大 stage 启动超时，避免断点停太久被父进程判定"启动失败"后杀掉整个 pipeline
+    omni_kwargs["stage_init_timeout"] = 3600 # 单 stage 初始化握手超时(默认300s)
+    omni_kwargs["init_timeout"] = 7200 # orchestrator 总启动超时(默认600s,内含所有 stage 初始化)
+    omni = Omni(**omni_kwargs) # 初始化多阶段引擎 —`Omni(**kwargs)` 构造时创建`AsyncOmniEngine` ，由`StageRuntime` 把 pipeline 的每个 stage（如 Qwen3-TTS 的 talker、code2wav）拉起为独立 vLLM 引擎子进程，注册进`StagePool` 统一管理，stage 间通过 connector（如共享内存）传递中间结果
+     
     batch_size = args.batch_size
+
+    # 获取每一个batch来进行处理
     for batch_start in range(0, len(inputs), batch_size):
+        """
+        batch中每一个请求的形式
+        {'prompt_token_ids': [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...], 
+        'additional_information': {'task_type': [...], 'text': [...], 'language': [...], 'speaker': [...], 'instruct': [...], 'max_new_tokens': [...], 'full_utterance_decode': [...]}}
+        """
         batch = inputs[batch_start : batch_start + batch_size]
-        for stage_outputs in omni.generate(batch):
-            output = stage_outputs
+
+        # stage_outputs是最后一个stage返回的结果，也就是所有stage处理完成后的结果
+        for stage_outputs in omni.generate(batch): # generate驱动整个pipline:把输入逐个stage送入进去，每一个stage得到一个输出OmniRequestOutput
+            output = stage_outputs 
+
+            # 将何处成语音写入目标文件
             _save_wav(output_dir, output.request_id, output.outputs[0].multimodal_output)
 
 
@@ -415,6 +454,9 @@ async def main_streaming(args):
     omni_kwargs = vars(args).copy()
     # Override CLI --model with the derived model_name.
     omni_kwargs["model"] = model_name
+    # 调试用：同上，放大启动超时
+    omni_kwargs["stage_init_timeout"] = 3600
+    omni_kwargs["init_timeout"] = 7200
     omni = AsyncOmni(**omni_kwargs)
 
     for i, prompt in enumerate(inputs):
@@ -462,8 +504,8 @@ def parse_args():
     parser.add_argument(
         "--stage-init-timeout",
         type=int,
-        default=300,
-        help="Timeout for initializing a single stage in seconds (default: 300)",
+        default=3600,
+        help="Timeout for initializing a single stage in seconds (default: 3600)",
     )
     parser.add_argument(
         "--batch-timeout",
@@ -474,8 +516,8 @@ def parse_args():
     parser.add_argument(
         "--init-timeout",
         type=int,
-        default=300,
-        help="Timeout for initializing stages in seconds (default: 300)",
+        default=3600,
+        help="Timeout for initializing stages in seconds (default: 3600)",
     )
     parser.add_argument(
         "--shm-threshold-bytes",
@@ -500,10 +542,11 @@ def parse_args():
         default=None,
         help="Path to a .txt file with one prompt per line (preferred).",
     )
+    # 默认配置文件
     parser.add_argument(
         "--deploy-config",
         type=str,
-        default=None,
+        default=os.path.join(os.path.dirname(__file__), "../../../../vllm_omni/deploy/qwen3_tts_debug.yaml"),
         help="Path to a deploy config YAML.",
     )
     parser.add_argument(
@@ -561,7 +604,7 @@ def parse_args():
 
 
 if __name__ == "__main__":
-    args = parse_args()
+    args = parse_args() # 添加参数
     if args.streaming:
         asyncio.run(main_streaming(args))
     else:

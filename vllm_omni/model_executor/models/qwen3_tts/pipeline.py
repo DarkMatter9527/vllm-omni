@@ -45,9 +45,10 @@ QWEN3_TTS_PIPELINE = PipelineConfig(
             async_chunk_process_next_stage_input_func=(f"{_PROC}.talker2code2wav_async_chunk"),
             supports_native_mrv2_data_plane=True,
             custom_process_next_stage_input_func=f"{_PROC}.talker2code2wav_full_payload",
-            sampling_constraints={
-                "detokenize": False,
-                "stop_token_ids": [2150],
+            # 采样参数红线
+            sampling_constraints={ 
+                "detokenize": False, # 表示token 不是文本，别解码，走多模态通道
+                "stop_token_ids": [2150], # 不用输出到最大长度
             },
         ),
         StagePipelineConfig(
@@ -68,7 +69,7 @@ QWEN3_TTS_PIPELINE = PipelineConfig(
             # mode no pre-stage processing is needed -- chunks deliver
             # directly to the consumer.
             sync_process_input_func=f"{_PROC}.talker2code2wav_token_only",
-            sampling_constraints={"detokenize": True},
+            sampling_constraints={"detokenize": True}, # 借用标准文本输出管道把结果交付给客户端
             extras={"tts_args": {"max_instructions_length": 500}},
             requires_full_payload_input=True,
         ),
