@@ -392,7 +392,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             "_tts_pad_embed",
             torch.zeros(1, int(self.talker_config.hidden_size), dtype=model_dtype),
             persistent=False,
-        )
+        ) # _tts_pad_embed是注册出来的
         self._embedding_dtype = torch.bfloat16
 
         tokenizer_config = Qwen3TTSTokenizerV2Config.from_pretrained(
@@ -432,7 +432,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             config=self.config,
             talker_config=self.talker_config,
             model_path=self.model_path,
-            text_embedding=self.text_embedding,
+            text_embedding=self.text_embedding, 
             text_projection=self.text_projection,
             codec_embed=self.embed_input_ids,
             residual_code_embeddings=lambda: self.code_predictor.get_input_embeddings(),
@@ -503,7 +503,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
 
     def compute_logits(
-        self, hidden_states: torch.Tensor | OmniOutput, sampling_metadata: Any = None
+        self, hidden_states: torch.Tensor | OmniOutput, sampling_metadata: Any = None # hidden_state.shape=(1, 1024)
     ) -> torch.Tensor | None:
         if isinstance(hidden_states, OmniOutput):
             hidden_states = hidden_states.text_hidden_states
@@ -515,11 +515,11 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         # 但 talker 的词表很大（`talker_config.vocab_size` ），里面 不全是音频 token ，还有普通文本 token 之类。而这一阶段只应该吐出 codec 音频 id
         # Prompt logprobs share this entry point with sampling, so preserve
         # the codec vocabulary mask even when the fused sampler is installed.
-        logits = logits.masked_fill(self._codec_disallowed_mask, float("-inf"))
+        logits = logits.masked_fill(self._codec_disallowed_mask, float("-inf")) # [1, 3072]
 
         # Suppress silence-region tokens for the first N decode frames (#4966). The
         # per-request decode step is the length of its generated-token history.
-        ban_n = self._silence_ban_frames
+        ban_n = self._silence_ban_frames # 0
         if ban_n > 0 and sampling_metadata is None and self._mrv2_silence_ban_mask is not None:
             if self._mrv2_silence_ban_mask.shape[0] != logits.shape[0]:
                 raise ValueError("MRV2 silence-ban batch must match the sampled logits rows")
@@ -576,7 +576,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         if isinstance(model_outputs, OmniOutput):
             return model_outputs
 
-        hidden = model_outputs
+        hidden = model_outputs # (40, 1024)
         info_dicts = kwargs.get("model_intermediate_buffer")
         if info_dicts is None:
             info_dicts = kwargs.get("runtime_additional_information") or []
@@ -784,14 +784,14 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
 
     def preprocess(
         self,
-        input_ids: torch.Tensor,
-        input_embeds: torch.Tensor | None,
-        **info_dict: Any, # 文本、指令等信息
+        input_ids: torch.Tensor, # shape = (40, )
+        input_embeds: torch.Tensor | None, # shape = (1024, )
+        **info_dict: Any, # 文本、指令等输入信息和最大token等配置信息
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         # Metadata may be passed flattened or under `additional_information`; normalize to flattened keys.
-        # 返回的`input_ids` 在 prefill 时是"长度占位符"，在 decode 时是"上一帧的 codec layer-0"
+        """ 对输入talker的信息进行加工处理 """
         
-        additional_information = info_dict.get("additional_information")
+        additional_information = info_dict.get("additional_information") # 获取额外信息
         if isinstance(additional_information, dict):
             merged: dict[str, Any] = {k: v for k, v in info_dict.items() if k != "additional_information"}
             for k, v in additional_information.items():
@@ -799,11 +799,11 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             info_dict = merged
 
         payload: OmniPayload = info_dict
-        embed = payload.get("embed", {})
-        hs = payload.get("hidden_states", {})
-        meta = payload.get("meta", {})
+        embed = payload.get("embed", {}) # 预计算的embedding缓存:与计算的embedding(prefill等)
+        hs = payload.get("hidden_states", {}) # 跨阶段/跨轮次的隐状态:文本队列逐帧消费(还没有被念到的token，由prefill阶段产生)，MTP用上一步hidden
+        meta = payload.get("meta", {}) # 运行时元数据:分块偏移、流式开关，帧有效性判断
 
-        span_len = int(input_ids.shape[0])  
+        span_len = int(input_ids.shape[0])  # 取出input_ids的长度
         if span_len <= 0:
             return input_ids, input_embeds if input_embeds is not None else self.embed_input_ids(input_ids), {}
         
@@ -821,34 +821,34 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         if not _has_tts_text_conditioning(info_dict, hs):
             raise ValueError("Missing Qwen3-TTS text conditioning: provide `text` or precomputed text token ids.")
 
-        task_type = (info_dict.get("task_type") or ["CustomVoice"])[0]
-        codec_streaming = self._codec_streaming_flag(meta, task_type) # 非流式输出
+        task_type = (info_dict.get("task_type") or ["CustomVoice"])[0] # 取出任务类型
+        codec_streaming = self._codec_streaming_flag(meta, task_type) # 非流式输出标识
 
         # ``tts_pad_embed`` is a request-independent constant — see
         # :meth:`_init_runtime_buffers`. Materialize once on the right
         # device/dtype and reuse for both the prefill placeholder padding
         # and the decode text-step fallback below.
-        dtype = self._embedding_dtype
-        tts_pad_embed = self._tts_pad_embed.to(device=input_ids.device, dtype=dtype).reshape(1, -1)
+        dtype = self._embedding_dtype # embedding数据类型
+        tts_pad_embed = self._tts_pad_embed.to(device=input_ids.device, dtype=dtype).reshape(1, -1) # 对tts_pad_token进行数据转换(tts_pad_token在权重加载load_weights的时候就已近取出),(1, 1024)
         
         # prefill分支
         if is_prefill:
             # Prefill (prompt embeddings)
-            prompt_embeds_buffer = embed.get("prefill")
+            prompt_embeds_buffer = embed.get("prefill") # 获取prefill好的embedding
             # First prefill round: the retained prompt buffer is not populated.
             # Subsequent chunks slice the buffer stored by the first round.
-            is_first_prefill = not isinstance(prompt_embeds_buffer, torch.Tensor) or prompt_embeds_buffer.ndim != 2
+            is_first_prefill = not isinstance(prompt_embeds_buffer, torch.Tensor) or prompt_embeds_buffer.ndim != 2 # 得到要不要prefill的标识
             if is_first_prefill:
                 full_prompt_embeds, tailing_text_hidden, ref_code_len, ref_code = (
                     self._prompt_builder.build_prompt_embeds(task_type=task_type, info_dict=info_dict)
                 )
-                prompt_embeds_buffer = full_prompt_embeds.detach()
+                prompt_embeds_buffer = full_prompt_embeds.detach() # 给输入指令、文本等prefill得到的内容缓存下来
                 if not bool(getattr(self, "_use_v2_model_runner", False)):
                     prompt_embeds_buffer = prompt_embeds_buffer.to("cpu")
                 prompt_embeds_buffer = prompt_embeds_buffer.contiguous()
                 info_update: OmniPayload = {
                     "embed": {"prefill": prompt_embeds_buffer},
-                    "hidden_states": {"trailing_text": tailing_text_hidden.detach()},
+                    "hidden_states": {"trailing_text": tailing_text_hidden.detach()}, # 其实是tts_pad_embedding
                     "meta": {
                         "talker_text_offset": 0,
                         "codec_streaming": codec_streaming,
@@ -868,7 +868,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
                 # so cache-recovery (prefill replay at a later offset) lands on the right
                 # slice of the stored embeddings. Subsequent chunks below advance from
                 # `talker_prefill_offset` written here.
-                offset = max(0, int(info_dict.get("_omni_num_computed_tokens", 0) or 0))
+                offset = max(0, int(info_dict.get("_omni_num_computed_tokens", 0) or 0)) # `offset` = 这段 prompt embedding 该从第几行开始取，取值来自 vLLM 已计算的 token 数，用于把 embedding 切片和 KV cache 位置对齐
             else:
                 # Subsequent prefill chunk: slice from stored embeddings at running offset.
                 offset = max(0, int(meta.get("talker_prefill_offset", 0) or 0))
@@ -906,7 +906,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             是 占位值 ——因为这些位置的 embedding 已被`prompt_embeds` 覆盖，token id 本身无意义，
             但必须是 in-vocab 合法值，供 vLLM 做内部 bookkeeping（记录 num_computed_tokens、判断 prefill 完成等）
             """
-            return input_ids_out, prompt_embeds, info_update
+            return input_ids_out, prompt_embeds, info_update # prefill分支返回:# prefill内容对应的pad_id(输出时不需要这部分), 输入指令、文本的prefill，状态信息
 
         if span_len > 1:
             inputs_embeds_out = (
@@ -1007,7 +1007,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         在 L960 用来查`codec_embedding` 得到`last_id_hidden` ，
         再与`text_step` 相加构成当前步的`inputs_embeds`
         """
-        return input_ids, inputs_embeds_out, info_update
+        return input_ids, inputs_embeds_out, info_update 
 
     def preprocess_decode_batch(
         self,
@@ -1175,8 +1175,8 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         # Keep the last token hidden for the next decode step's code predictor.
         # Stays on GPU - gpu_resident_buffer_keys avoids the CPU round-trip.
         if hidden_states.numel() == 0:
-            return {}
-        last = hidden_states[-1, :].detach()
+            return {} 
+        last = hidden_states[-1, :].detach() # [1024, ]
         return {"hidden_states": {"last": last}}
 
     def postprocess_batch_mrv2(
@@ -1668,7 +1668,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         """
         device = next(self.parameters()).device
         pad_ids = torch.tensor([[int(self.config.tts_pad_token_id)]], device=device, dtype=torch.long)
-        pad_proj = self.text_projection(self.text_embedding(pad_ids)).reshape(1, -1)
+        pad_proj = self.text_projection(self.text_embedding(pad_ids)).reshape(1, -1) # 取出pad_token对应的向量
         self._tts_pad_embed.copy_(pad_proj.to(device=self._tts_pad_embed.device, dtype=self._tts_pad_embed.dtype))
 
     # -------------------- GPU-side MTP fast-path --------------------
@@ -1676,10 +1676,10 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
     @torch.inference_mode()
     def talker_mtp(
         self,
-        input_ids: torch.Tensor,
-        input_embeds: torch.Tensor,
-        last_talker_hidden: torch.Tensor,
-        text_step: torch.Tensor,
+        input_ids: torch.Tensor, # (1, ) 主干预测的ID值
+        input_embeds: torch.Tensor, # (1, 1024) 主干计算layer0单码的embedding，来自主干的embed_input_ids方法
+        last_talker_hidden: torch.Tensor, # (1, 1024) # 上一步主干forward最后一个位置的hidden state(qwen3主干forward输出的最后一个hidden_state)
+        text_step: torch.Tensor, # (1, 1024) 这一帧要念的token的向量
         do_sample: bool | None = None,
         temperature: float | None = None,
         top_k: int | None = None,
@@ -1692,14 +1692,14 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         """GPU fast-path used by OmniGPUModelRunner to predict residual codebooks (1..Q-1).
         Returns (inputs_embeds, audio_codes) for the current step."""
         bsz = int(input_ids.shape[0])
-        q = int(self.talker_config.num_code_groups)
+        q = int(self.talker_config.num_code_groups) # 16, 码本数量
         dev = input_embeds.device
         dtype = self._embedding_dtype
 
-        input_ids = input_ids.reshape(bsz, 1).to(dtype=torch.long, device=dev)
-        last_id_hidden = input_embeds.reshape(bsz, 1, -1).to(dtype=dtype, device=dev)
-        past_hidden = last_talker_hidden.reshape(bsz, 1, -1).to(dtype=dtype, device=dev)
-        text_step = text_step.reshape(bsz, 1, -1).to(dtype=dtype, device=dev)
+        input_ids = input_ids.reshape(bsz, 1).to(dtype=torch.long, device=dev) # torch.Size([1, 1024])
+        last_id_hidden = input_embeds.reshape(bsz, 1, -1).to(dtype=dtype, device=dev) # torch.Size([1, 1, 1024])
+        past_hidden = last_talker_hidden.reshape(bsz, 1, -1).to(dtype=dtype, device=dev) # torch.Size([1, 1, 1024])
+        text_step = text_step.reshape(bsz, 1, -1).to(dtype=dtype, device=dev) # torch.Size([1, 1, 1024]) 当前这一帧该念的那个文本 token 的 embedding
 
         # Residual predictor runs fixed-length (Q-1) steps via the vLLM-native code_predictor.
         max_steps = q - 1
@@ -1707,7 +1707,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             audio_codes = input_ids.reshape(bsz, 1)
             return (last_id_hidden + text_step).reshape(bsz, -1), audio_codes
 
-        subtalker_params = self._subtalker_sampling_params
+        subtalker_params = self._subtalker_sampling_params # 采样参数
         if do_sample is None:
             do_sample = bool(subtalker_params.get("do_sample", True))
         if temperature is None:
@@ -1718,9 +1718,9 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             top_p = float(subtalker_params.get("top_p", 1.0))
 
         audio_codes = self.code_predictor(
-            layer0_code=input_ids.reshape(bsz, 1),
-            layer0_embed=last_id_hidden,
-            last_talker_hidden=past_hidden,
+            layer0_code=input_ids.reshape(bsz, 1), # 主干预测的ID值，第一层码本id
+            layer0_embed=last_id_hidden, # 主干预测token的潜向量，第一层码本对应的向量
+            last_talker_hidden=past_hidden, # 主干forward最后一层得到的潜向量
             do_sample=do_sample,
             temperature=temperature,
             top_k=top_k,
@@ -1728,7 +1728,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             generator=generator,
             generators=generators,
             sample_uniforms=sample_uniforms,
-        )  # [B, Q]
+        )  # [B, Q] = [1, 16]
 
         # Map invalid layer-0 ids (e.g. EOS) to PAD=0 so SpeechTokenizer sees only real codes.
         layer0 = audio_codes[:, :1]
@@ -1736,15 +1736,15 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         audio_codes = torch.where(invalid0.expand_as(audio_codes), torch.zeros_like(audio_codes), audio_codes)
 
         # Single gather over stacked [Q-1, V, H] replaces Q-1 serial embedding kernels.
-        residual_ids_t = audio_codes[:, 1:]
-        if self._stacked_codec_embed is None:
-            self._build_stacked_codec_embed()
+        residual_ids_t = audio_codes[:, 1:] # 取出语音ID
+        if self._stacked_codec_embed is None: #`_stacked_codec_embed` 负责"把码再翻译回 talker 能吃的向量
+            self._build_stacked_codec_embed() # torch.Size([15, 2048, 1024]) 
         embed_weight = self._stacked_codec_embed.to(device=dev)
-        row_idx = torch.arange(max_steps, device=dev).unsqueeze(0).expand(bsz, -1)
-        gathered = embed_weight[row_idx, residual_ids_t]
+        row_idx = torch.arange(max_steps, device=dev).unsqueeze(0).expand(bsz, -1) # torch.Size([1, 15])
+        gathered = embed_weight[row_idx, residual_ids_t] # torch.Size([1, 15, 1024])
         summed = (last_id_hidden.squeeze(1) + gathered.sum(dim=1)).unsqueeze(1)
         inputs_embeds_out = (summed + text_step).reshape(bsz, -1)
-        return inputs_embeds_out, audio_codes.to(dtype=torch.long)
+        return inputs_embeds_out, audio_codes.to(dtype=torch.long) # inputs_embeds_out.shape, audio_codes.shape = (torch.Size([1, 1024]), torch.Size([1, 16]))
 
     # MRV2 capability names read the V1 canonical values so platform patches
     # such as the NPU 310P graph-safety override apply to both runners.

@@ -70,7 +70,7 @@ PRECOMPUTED_REF_IDS_KEY = "_qwen3_tts_ref_ids"
 # ---------------------------------------------------------------------------
 
 
-def build_assistant_text(text: str) -> str:
+def build_assistant_text(text: str) -> str: # 添加提示词
     return f"<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n"
 
 
@@ -356,9 +356,9 @@ class Qwen3TTSPromptEmbedsBuilder:
         self._config = config
         self._talker_config = talker_config
         self._model_path = model_path
-        self._text_embedding = text_embedding
-        self._text_projection = text_projection
-        self._codec_embed = codec_embed
+        self._text_embedding = text_embedding # nn.Embedding(text_vocab_size, 2048), 文本塔自己的词表，宽度和 talker 主干不匹配,
+        self._text_projection = text_projection # Qwen3TTSTalkerResizeMLP,把文本塔的向量压进 talker 主干宽度,遇到文本位置 → 走`text_embedding` +`text_projection`
+        self._codec_embed = codec_embed # talker 主干自带的 embedding 表,遇到音频位置 → 走`codec_embed`
         self._residual_code_embeddings = residual_code_embeddings
         self._speaker_encoder = speaker_encoder
         self._tts_pad_embed_buffer = tts_pad_embed
@@ -450,7 +450,7 @@ class Qwen3TTSPromptEmbedsBuilder:
         request's text: the prompt is then prefix + (text + pad row) + eos row
         + tail, exactly what the full path assembles from the same rows.
         """
-        entry = self._cached_custom_voice_entry(info_dict, text, language)
+        entry = self._cached_custom_voice_entry(info_dict, text, language) # 看看这个说话人+语言的 prompt 头尾有没有缓存，有就复用
         req_id = str(info_dict.get("req_id"))
         if entry is None or req_id not in self._batched_text_embeds:
             return None
@@ -554,9 +554,9 @@ class Qwen3TTSPromptEmbedsBuilder:
     def _projected_tokens(self, values: Sequence[int], device: torch.device) -> torch.Tensor:
         device = torch.device(device)
         key = (str(device), tuple(int(v) for v in values))
-        cached = self._projected_token_cache.get(key)
+        cached = self._projected_token_cache.get(key) # 从字典中找有没有存储过eos或bos向量
         if cached is None:
-            cached = self._project_text_ids(self._long_tensor(values, device))
+            cached = self._project_text_ids(self._long_tensor(values, device)) # 获取指定ID值的词向量
             self._projected_token_cache[key] = cached
         return cached
 
@@ -587,7 +587,7 @@ class Qwen3TTSPromptEmbedsBuilder:
         """``text_projection(text_embedding(ids))``, from the projected table when it is built."""
         table = self._projected_text_table
         if table is None or table.device != ids.device:
-            return self._text_projection(self._text_embedding(ids))
+            return self._text_projection(self._text_embedding(ids)) # 从词表中查询获取指定ID的词向量
         return torch.nn.functional.embedding(ids, table)
 
     def _get_resampler(self, orig_sr: int, target_sr: int) -> AudioResampler:
@@ -1241,28 +1241,28 @@ class Qwen3TTSPromptEmbedsBuilder:
             * ``ref_code``: The ``[T, Q]`` ref codec tensor used for ICL (T = 参考音频经 codec 编码后的帧数,Q为码本数量)
                     (``None`` outside Base / ICL).
         """
-        config = self._config
-        talker_config = self._talker_config
-        text_embedding = self._text_embedding
-        text_projection = self._text_projection
-        codec_embed = self._codec_embed
+        config = self._config # Qwen3TTSConfig模型配置
+        talker_config = self._talker_config # Qwen3TTSTalkConfig分词器配置
+        text_embedding = self._text_embedding # talker初始化新创建的词嵌入模块，直接使用nn.embedding——属于文本侧，用于获取文本信息,2048维
+        text_projection = self._text_projection # qwen3_tts_talker中的Qwen3TTSTalkerResizeMLP，也是qwen2的MLP
+        codec_embed = self._codec_embed # 是qwen2的词嵌入模块(矩阵)——属于语音侧，用于获取语音信息
 
-        text = (info_dict.get("text") or [""])[0]
-        language = (info_dict.get("language") or ["Auto"])[0]
+        text = (info_dict.get("text") or [""])[0] # 合成文本
+        language = (info_dict.get("language") or ["Auto"])[0] # 合成语言
         non_streaming_mode = self._non_streaming_mode(info_dict, task_type)
         if task_type == "CustomVoice" and non_streaming_mode:
-            fast = self._cached_custom_voice_prompt(info_dict, text, language)
+            fast = self._cached_custom_voice_prompt(info_dict, text, language) # 这是在`build_prompt_embeds` 里的一个**"缓存快路径"入口**：命中就直接返回，跳过下面上百行的完整拼装
             if fast is not None:
                 return fast
 
         # Text ids for assistant template (always).
-        tok = self.get_text_tokenizer()
-        dev = self._device()
-        input_ids = coerce_token_ids(info_dict.pop(PRECOMPUTED_TEXT_IDS_KEY, None), device=dev)
+        tok = self.get_text_tokenizer() # 获取qwen2分词器
+        dev = self._device() 
+        input_ids = coerce_token_ids(info_dict.pop(PRECOMPUTED_TEXT_IDS_KEY, None), device=dev) # 把“批量预处理阶段已经算好、存在`info_dict` 里的正文 token ids”取出来（并顺手删掉这个键
         if input_ids is None:
             input_ids = to_device_nonblocking(
                 tok(build_assistant_text(text), return_tensors="pt", padding=False)["input_ids"], dev
-            )
+            ) # 添加输入指令提示词后分词,并使用不阻塞CPU的方式讲数据移到GPU上, [1, 26]
 
         # Optional instruct prefix.
         instruct = (info_dict.get("instruct") or [""])[0]
@@ -1270,20 +1270,20 @@ class Qwen3TTSPromptEmbedsBuilder:
         if isinstance(instruct, str) and instruct.strip():
             instruct_ids = tok(build_instruct_text(instruct), return_tensors="pt", padding=False)["input_ids"].to(
                 device=input_ids.device
-            )
-            instruct_embed = text_projection(text_embedding(instruct_ids))
+            ) # [1, 11]
+            instruct_embed = text_projection(text_embedding(instruct_ids)) # qwen2的文本词向量维度(2048)和主干talker新创建的词向量的维度(1024)不一致,用text_projection将2048转为1024
 
         # tts special token embeds (projected into talker hidden).
         # ``tts_pad_embed`` is precomputed (request-independent), so we only
         # need bos/eos here.
-        projected_tts = self._projected_tokens([config.tts_bos_token_id, config.tts_eos_token_id], input_ids.device)
-        tts_bos_embed, tts_eos_embed = projected_tts.chunk(2, dim=1)
-        tts_pad_embed = self._pad_embed(input_ids.device, tts_bos_embed.dtype)
+        projected_tts = self._projected_tokens([config.tts_bos_token_id, config.tts_eos_token_id], input_ids.device) # 从text_embedding中查出两个特殊token的向量并投影到talker隐空间
+        tts_bos_embed, tts_eos_embed = projected_tts.chunk(2, dim=1) # 分开bos和eos的词向量
+        tts_pad_embed = self._pad_embed(input_ids.device, tts_bos_embed.dtype) # 从text_embeddng取出的pad_embed进行设备转移
 
         # Codec prefill tags.
         language_id = None
         if isinstance(language, str) and language.lower() != "auto":
-            language_id = talker_config.codec_language_id.get(language.lower())
+            language_id = talker_config.codec_language_id.get(language.lower()) # 从语言到ID值的映射字典中获取各种不同语言对应的ID值
         # Match official dialect override:
         # If language is Chinese/Auto and the selected speaker is a dialect voice,
         # set language_id to that dialect to improve code generation stability.
@@ -1307,15 +1307,15 @@ class Qwen3TTSPromptEmbedsBuilder:
         else:
             codec_prefill_list = [
                 [
-                    talker_config.codec_think_id,
-                    talker_config.codec_think_bos_id,
-                    int(language_id),
-                    talker_config.codec_think_eos_id,
+                    talker_config.codec_think_id, # 思考token
+                    talker_config.codec_think_bos_id, # 开始token
+                    int(language_id), # 语言token
+                    talker_config.codec_think_eos_id, # 结束token
                 ]
-            ]
-
-        codec_input_0 = self._codec_embeds(codec_prefill_list[0], input_ids.device)
-        codec_input_1 = self._codec_embeds([talker_config.codec_pad_id, talker_config.codec_bos_id], input_ids.device)
+            ] # 四个 语音token id: [codec_think_id, codec_think_bos_id, codec_language_id, codec_think_eos_id]
+        # 语音id转向量，维度均为1024
+        codec_input_0 = self._codec_embeds(codec_prefill_list[0], input_ids.device) 
+        codec_input_1 = self._codec_embeds([talker_config.codec_pad_id, talker_config.codec_bos_id], input_ids.device) 
 
         # Speaker embedding/token (task-dependent)
         speaker_embed: torch.Tensor | None = None
@@ -1636,28 +1636,28 @@ class Qwen3TTSPromptEmbedsBuilder:
                     )
 
         elif task_type == "CustomVoice":
-            _speaker_raw = info_dict.get("speaker") or [""]
+            _speaker_raw = info_dict.get("speaker") or [""] # 语音角色
             speaker = (
                 ((_speaker_raw[0] if isinstance(_speaker_raw, (list, tuple)) else _speaker_raw) or "").lower().strip()
             )
             if not speaker:
                 raise ValueError("CustomVoice requires additional_information.speaker.")
-            speaker_key = (str(input_ids.device), speaker)
+            speaker_key = (str(input_ids.device), speaker) # ('cuda:0', 'vivian')
             cached_speaker = self._speaker_embed_cache.get(speaker_key)
             if cached_speaker is None:
-                spk_id_map = {k.lower(): v for k, v in (getattr(talker_config, "spk_id", None) or {}).items()}
+                spk_id_map = {k.lower(): v for k, v in (getattr(talker_config, "spk_id", None) or {}).items()} # 加载角色对应id字典
                 if speaker not in spk_id_map:
                     raise ValueError(f"Unsupported speaker: {speaker}")
                 spk_id = spk_id_map[speaker]
                 # Keep it at least 1D; embedding on a 0-d tensor can return 1D.
-                spk_embed = codec_embed(index_to_device([spk_id], input_ids.device))
-                if spk_embed.ndim in (1, 2):
-                    spk_embed = spk_embed.view(1, 1, -1)
-                cached_speaker = self._speaker_embed_cache[speaker_key] = (spk_id, spk_embed)
+                spk_embed = codec_embed(index_to_device([spk_id], input_ids.device)) # 使用qwen模型的embedding进行嵌入
+                if spk_embed.ndim in (1, 2): # 判断维度多少
+                    spk_embed = spk_embed.view(1, 1, -1) # [1, 1024] -> [1, 1, 1024]
+                cached_speaker = self._speaker_embed_cache[speaker_key] = (spk_id, spk_embed) # 
             spk_id, spk_embed = cached_speaker
-            speaker_embed = spk_embed
-            codec_input = torch.cat([codec_input_0, speaker_embed, codec_input_1], dim=1)
-
+            speaker_embed = spk_embed # 角色向量
+            codec_input = torch.cat([codec_input_0, speaker_embed, codec_input_1], dim=1) # [1, 7, 1024] [think, think_bos, laguage, bos, speaker, pad, eos]
+            # 
             # The role tokens, speaker/language codec prefix, codec pad row and
             # closing row do not depend on the text: cache them per speaker and
             # language so a request only embeds and projects its own text.
@@ -1670,16 +1670,16 @@ class Qwen3TTSPromptEmbedsBuilder:
                     int(spk_id),
                     codec_prefill_list[0][2] if len(codec_prefill_list[0]) == 4 else None,
                 )
-            cv_cache = self._custom_voice_prompt_cache
+            cv_cache = self._custom_voice_prompt_cache # prompt里跟文本无关的那几行的缓存字典
             cached = cv_cache.get(cache_key) if cache_key is not None else None
             if cached is None:
-                role_embed = text_projection(text_embedding(input_ids[:, :3]))
-                codec_prefix = torch.cat((tts_pad_embed.expand(-1, codec_input.shape[1] - 2, -1), tts_bos_embed), dim=1)
-                codec_prefix = codec_prefix + codec_input[:, :-1]
-                prefix = torch.cat((role_embed, codec_prefix), dim=1)
+                role_embed = text_projection(text_embedding(input_ids[:, :3])) # 获取系统提示嵌入向量 [1, 3, 1024]
+                codec_prefix = torch.cat((tts_pad_embed.expand(-1, codec_input.shape[1] - 2, -1), tts_bos_embed), dim=1) # [1, 6, 1024] 文本通道:  [ PAD , PAD , PAD , PAD , PAD , BOS ]
+                codec_prefix = codec_prefix + codec_input[:, :-1] # 把文本特征和语音特征混合一下，也可以把它想成双轨字幕:左轨是台词文本，右轨是音效/说话人标记；codec通道: [ think, think_bos, language, think_eos, speaker, pad ]
+                prefix = torch.cat((role_embed, codec_prefix), dim=1) # [1, 9, 1024] 系统提示加混合语音、文本特征
                 pad_row = self._codec_embeds([talker_config.codec_pad_id], input_ids.device).view(1, 1, -1)
-                tail = tts_pad_embed + self._codec_embeds([talker_config.codec_bos_id], input_ids.device)
-                eos_row = tts_eos_embed + pad_row
+                tail = tts_pad_embed + self._codec_embeds([talker_config.codec_bos_id], input_ids.device) # 音频流从这里开始
+                eos_row = tts_eos_embed + pad_row # 文本流念完了
                 if cache_key is not None:
                     cv_cache[cache_key] = (prefix, pad_row, tail, eos_row)
             else:
@@ -1687,7 +1687,7 @@ class Qwen3TTSPromptEmbedsBuilder:
             if cache_key is not None:
                 # Later requests of this speaker/language resolve straight to the cached rows.
                 self.__dict__.setdefault("_cv_fast_keys", {})[(self._speaker_field(info_dict), language)] = cache_key
-            talker_prompt = prefix
+            talker_prompt = prefix # [1, 9, 1024]
 
             """
             `trailing_text_hidden` 是 prefill 之后剩余文本 token 的 embedding 队列 ，形状`[T, hidden]` 
@@ -1695,9 +1695,9 @@ class Qwen3TTSPromptEmbedsBuilder:
             if non_streaming_mode:
                 text_all = self._batched_text_embeds.pop(str(info_dict.get("req_id")), None)
                 if text_all is None:
-                    text_all = text_projection(text_embedding(input_ids[:, 3:-5]))
+                    text_all = text_projection(text_embedding(input_ids[:, 3:-5])) # 输入指令、文本的向量, [1, 18, 1024]
                 # (text + eos) + pad row, with the constant eos row added once per speaker.
-                talker_prompt = torch.cat([talker_prompt, text_all + pad_row, eos_row, tail], dim=1)
+                talker_prompt = torch.cat([talker_prompt, text_all + pad_row, eos_row, tail], dim=1) # [1, 29, 1024]
                 trailing_text_hidden = tts_pad_embed
             else:
                 # prefill 只放第一个文本 token
@@ -1740,7 +1740,7 @@ class Qwen3TTSPromptEmbedsBuilder:
                     ],
                     dim=1,
                 )
-                trailing_text_hidden = tts_pad_embed
+                trailing_text_hidden = tts_pad_embed # [1, 1, 1024]
             else:
                 first_text = text_projection(text_embedding(input_ids[:, 3:4])) + codec_input[:, -1:]
                 talker_prompt = torch.cat([talker_prompt, first_text], dim=1)
@@ -1755,13 +1755,13 @@ class Qwen3TTSPromptEmbedsBuilder:
             raise ValueError(f"Unsupported task_type={task_type}")
 
         if instruct_embed is not None:
-            talker_prompt = torch.cat([instruct_embed, talker_prompt], dim=1)
+            talker_prompt = torch.cat([instruct_embed, talker_prompt], dim=1) # [1, 40, 1024]
 
         return (
-            talker_prompt.squeeze(0),  # [prompt_len, H]
-            trailing_text_hidden.squeeze(0),  # [T, H]
-            ref_code_len,
-            ref_code_prompt.contiguous() if isinstance(ref_code_prompt, torch.Tensor) else None,
+            talker_prompt.squeeze(0),  # [prompt_len, H] = [40, 1024] = [instruct, role, think, think_bos, language, think_eos, speaker, pad, text, eos_row, tail]
+            trailing_text_hidden.squeeze(0),  # [T, H] = [1, 40] pad
+            ref_code_len, # 合成时没有 
+            ref_code_prompt.contiguous() if isinstance(ref_code_prompt, torch.Tensor) else None, # 合成任务也没有
         )
 
     # -------------------- prompt-length estimator --------------------

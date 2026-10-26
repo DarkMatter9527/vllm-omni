@@ -24,6 +24,12 @@ from vllm.utils.platform_utils import is_uva_available
 
 def to_device_nonblocking(tensor: torch.Tensor, device: torch.device | str) -> torch.Tensor:
     """Copy CPU tensors to CUDA/NPU without waiting for queued device work."""
+    """
+    把 CPU 上的张量拷到 GPU，但用“pinned + non_blocking”的方式，让 CPU 不用停下来等前面的 GPU 算完。
+
+    tensor.to("cuda")                      # 会阻塞：CPU 要等 stream 上已排队的 kernel 全跑完
+    to_device_nonblocking(tensor, "cuda")  # 不阻塞：CPU 拷完立刻往下走
+    """
     device = torch.device(device)
     if tensor.device.type != "cpu" or device.type not in {"cuda", "npu"}:
         return tensor.to(device)

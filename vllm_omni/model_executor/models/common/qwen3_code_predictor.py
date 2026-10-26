@@ -754,7 +754,7 @@ class CodePredictorWrapper(nn.Module):
             embedding_dim=_talker_hidden,
             use_parallel_embedding=wrapper_config.use_parallel_embedding,
             prefix=f"{prefix}.model" if prefix else "model",
-        )
+        ) # MTP中的小型transformer
 
         self.lm_head = nn.ModuleList(
             [nn.Linear(cp_config.hidden_size, cp_config.vocab_size, bias=False) for _ in range(self._num_groups - 1)]
@@ -892,7 +892,7 @@ class CodePredictorWrapper(nn.Module):
         # until the upstream XPU compiler issue is resolved.
         if current_omni_platform.is_xpu() or not current_omni_platform.supports_torch_inductor():
             # NPU or other platforms without Inductor support
-            self._compiled_model_fwd = self.model.forward
+            self._compiled_model_fwd = self.model.forward # NPU/XPU不支持inductor，就是原样的self.model.forward，NPU另靠NPU graph加速
 
             if current_omni_platform.is_npu() and self._wrapper_config.use_cuda_graphs:
                 # For NPU, use eager + NPU graphs (no torch.compile)
@@ -911,7 +911,7 @@ class CodePredictorWrapper(nn.Module):
             self.model.forward,
             dynamic=False,
             options={"epilogue_fusion": False},
-        )
+        ) # cuda支持inductor，走编译后的forward
         self._short_kv_enabled = (
             self._kv_cache_enabled
             and self._short_kv_requested
@@ -1292,10 +1292,10 @@ class CodePredictorWrapper(nn.Module):
         device = proj_buf.device
         max_seq = self._num_groups + 1
         model_fwd = self._compiled_model_fwd
-        lm_heads = self._lm_heads_list
+        lm_heads = self._lm_heads_list # 有十五个线性层的列表，将温度由1024->2048
         graph_key: int | tuple[int, int] = padded_bsz
         seq_len = max_seq
-        if self._prefix_reprefill_enabled:
+        if self._prefix_reprefill_enabled: # 这是在 把「本步实际需要的序列长度」向上取整到预设的桶(bucket)长度 ，好让多个 step 复用同一张已捕获的图
             actual_seq_len = step + 1
             for prefix_seq_len in self._prefix_reprefill_seq_lens:
                 if prefix_seq_len < actual_seq_len:
@@ -1305,14 +1305,14 @@ class CodePredictorWrapper(nn.Module):
                     graph_key = prefix_key
                     seq_len = prefix_seq_len
                     break
-        pos_ids = self._bucket_pos_ids.get(graph_key)
+        pos_ids = self._bucket_pos_ids.get(graph_key) # torch.Size([1, 17])
         if pos_ids is None:
             pos_ids = (
                 torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0).expand(padded_bsz, -1).contiguous()
             )
 
         # Use captured device graph if available, otherwise call compiled fn.
-        device_graph_entry = self._device_graphs.get(graph_key)
+        device_graph_entry = self._device_graphs.get(graph_key) # None
 
         # Let the outer graph record the regular forward during capture;
         # normal inference still uses the inner graph replay fast path.
@@ -1320,7 +1320,7 @@ class CodePredictorWrapper(nn.Module):
             device_graph_entry[0].replay()
             hidden_out = device_graph_entry[1]
         else:
-            hidden_out = model_fwd(proj_buf[:padded_bsz, :seq_len, :], pos_ids)
+            hidden_out = model_fwd(proj_buf[:padded_bsz, :seq_len, :], pos_ids) # model_fwd是小的transformer,torch.Size([1, 17, 1024])
 
         return lm_heads[step - 1](hidden_out[:bsz, step, :])
 
@@ -1368,36 +1368,36 @@ class CodePredictorWrapper(nn.Module):
         sample_uniforms: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Predict residual codebooks 1..G-1 autoregressively via re-prefill."""
-        bsz = int(layer0_code.shape[0])
-        num_groups = self._num_groups
-        self._validate_sampling_inputs(bsz, generators, sample_uniforms)
+        bsz = int(layer0_code.shape[0]) # 1
+        num_groups = self._num_groups # 16
+        self._validate_sampling_inputs(bsz, generators, sample_uniforms) # 对采样参数(如长度、形状)做一次校验
         sample_generator: _GeneratorLike = generators if generators is not None else generator
         device = layer0_code.device
 
         # _setup_compile caches _model_dtype on first call; use it for buffers
         # so they always match model weight precision (#2385).
-        self._setup_compile()
-        dtype = self._model_dtype
+        self._setup_compile() # 初始化MTP用的小transformer
+        dtype = self._model_dtype 
 
-        padded_bsz = self._padded_bsz(bsz)
+        padded_bsz = self._padded_bsz(bsz) # 把batch对齐到固定尺寸，并确保对应大小的显存缓冲区已就位
         self._ensure_buffers(device, dtype, padded_bsz)
-
-        proj_buf = self._proj_buf
-        projection = self.small_to_mtp_projection
-        codec_embeds = self._codec_embeds_list
+        """存预测的token_id对应的向量"""
+        proj_buf = self._proj_buf # torch.Size([1, 17, 1024]),工作缓冲区（序列拼装区),当作 code predictor 的输入序列来用，第二个维度上的不同位置存入不同码本预测得到的向量
+        projection = self.small_to_mtp_projection # 线性层做维度转换,把talker主干的向量投影到code_predictor自己的宽度(两者不一致时用 Linear，一致就直接 Identity)
+        codec_embeds = self._codec_embeds_list # 各残余码本的嵌入表列表,把采样得到的id转化为向量,喂回到code_predictor到自己的循环，预测在同一帧内剩下的那些码本token id
         # torch-npu cannot replay an inner NPUGraph while the outer talker_mtp
         # graph is being captured. Capture state is constant for this forward.
-        is_npu_capturing = current_omni_platform.is_npu() and torch.npu.is_current_stream_capturing()
+        is_npu_capturing = current_omni_platform.is_npu() and torch.npu.is_current_stream_capturing() # 此刻是不是正在做 NPU 的图捕获（graph capture）
 
         # Zero the padded region of the buffer
         proj_buf[:padded_bsz].zero_()
-
+        # 给前两个位置添加向量
         # Fill buffer positions 0 (talker hidden) & 1 (layer0 embed)
-        proj_buf[:bsz, 0, :] = projection(last_talker_hidden.reshape(bsz, 1, -1).to(dtype)).reshape(bsz, -1)
+        proj_buf[:bsz, 0, :] = projection(last_talker_hidden.reshape(bsz, 1, -1).to(dtype)).reshape(bsz, -1) # 主干最后一层隐向量，先展开变换维度，在变回原形与填入部分对齐
         proj_buf[:bsz, 1, :] = projection(layer0_embed.reshape(bsz, 1, -1).to(dtype)).reshape(bsz, -1)
 
         # Prepare sampling parameters
-        stored_mode = self._wrapper_config.sampling_mode == "stored"
+        stored_mode = self._wrapper_config.sampling_mode == "stored" # 判断采样参数该从哪来: False从预先存在wrapper，每次调用现场传进来
         if stored_mode:
             s_top_k = self._top_k
             s_top_p = self._top_p
@@ -1408,16 +1408,16 @@ class CodePredictorWrapper(nn.Module):
                 raise NotImplementedError(
                     "top_p sampling is not implemented for the vLLM-native code predictor; please set top_p=1.0."
                 )
-
+        """ 存放16个id"""
         # Output codes -- shape depends on return mode
         if self._wrapper_config.return_proj_buf:
             all_codes = torch.empty(bsz, num_groups, 1, dtype=torch.int64, device=device)
             all_codes[:, 0] = layer0_code.reshape(bsz, -1)[:, :1]
         else:
-            all_codes = torch.empty(bsz, num_groups, dtype=torch.long, device=device)
+            all_codes = torch.empty(bsz, num_groups, dtype=torch.long, device=device) # (1, 16)
             all_codes[:, 0] = layer0_code.reshape(bsz)
 
-        kv_caches = None
+        kv_caches = None # 为增量K/V解码准备缓存
         if self._kv_cache_enabled:
             # Masked slots still enter the attention matmul with zero weight, so
             # clear them: a non-finite value left by an earlier call would leak.
@@ -1425,7 +1425,7 @@ class CodePredictorWrapper(nn.Module):
                 self._kv_buf[:, :, :padded_bsz].zero_()
             kv_caches = self._kv_views(padded_bsz)
         # Autoregressive loop: predict layers 1..G-1
-        for step in range(1, num_groups):
+        for step in range(1, num_groups): # 算 logits → 采样出第`step` 个码code → code向量存进`all_codes[:, step]`
             if kv_caches is not None:
                 # Step 1 runs positions 0-1; later steps append one position.
                 positions, key_mask = self._kv_steps[step]
@@ -1496,7 +1496,7 @@ class CodePredictorWrapper(nn.Module):
 
         if self._wrapper_config.return_proj_buf:
             return all_codes, proj_buf[:bsz].clone()
-        return all_codes
+        return all_codes # [1, 16] 返回预测出来的16个token id值
 
     # ------------------------------------------------------------------
     #  Weight loading
