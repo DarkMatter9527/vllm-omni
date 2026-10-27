@@ -1757,3 +1757,19 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
     @property
     def mtp_accepts_per_row_generators(self) -> bool:
         return self.talker_mtp_accepts_per_row_generators
+
+    def create_mrv2_model_state(self, vllm_config, encoder_cache, device):
+        """Request state for Model Runner V2.
+
+        NPU needs the Ascend attention metadata, which the shared Omni state
+        does not build; every other platform keeps the shared Omni state.
+        """
+        if getattr(device, "type", None) == "npu":
+            from vllm_omni.platforms.npu.models.qwen3_tts_model_state import (
+                NPUQwen3TTSTalkerModelState,
+            )
+
+            return NPUQwen3TTSTalkerModelState(vllm_config, self, encoder_cache, device)
+        from vllm_omni.worker_v2.model_states.omni_model_state import OmniModelState
+
+        return OmniModelState(vllm_config, self, encoder_cache, device)

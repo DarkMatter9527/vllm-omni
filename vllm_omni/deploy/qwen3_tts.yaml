@@ -151,13 +151,17 @@ platforms:
         # Stage 1 eager on ROCm so decoder convolutions execute normally.
         enforce_eager: true
   npu:
-    model_runner: v1
+    # Stage 0 (talker) runs MRV2 through the Ascend V2 runner and the NPU
+    # talker model state; stage 1 (code2wav) has no NPU V2 support yet.
+    model_runner: v2
     stages:
       - stage_id: 0
+        model_runner: v2
         enforce_eager: false
         compilation_config:
           cudagraph_mode: PIECEWISE
       - stage_id: 1
+        model_runner: v1
         compilation_config:
           cudagraph_mode: PIECEWISE
   xpu:
