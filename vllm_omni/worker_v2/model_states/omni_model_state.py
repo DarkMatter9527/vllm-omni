@@ -833,10 +833,12 @@ class OmniModelState(DefaultModelState):
             )
             for entry, updates in zip(decode_entries, updates_by_req, strict=True):
                 i, req_idx, start, _, _, _ = entry
-                decode_mtp_rows.append((i, start))
+                if self._has_mtp:
+                    decode_mtp_rows.append((i, start))
                 batched_indices.add(i)
                 self.intermediate_buffer.update(req_idx, updates, gpu_keys)
-            text_step_batches.append(batch_text_step.reshape(batch_size, -1))
+            if self._has_mtp:
+                text_step_batches.append(batch_text_step.reshape(batch_size, -1))
 
         for i, req_idx, start, n_tok, info, _is_prefill in preprocess_entries:
             if i in batched_indices:
