@@ -113,7 +113,7 @@ def omni_snapshot_download(model_id: str) -> str:
             cache_dir=None,
             allow_patterns=["*"],
             require_all=True,
-        )
+        ) # 本地有就不下载到磁盘
     except huggingface_hub.errors.GatedRepoError:
         raise ValueError(
             f"Access to model '{model_id}' is restricted. "
@@ -169,8 +169,8 @@ class OmniBase(PDDisaggregationMixin):
 
     def __init__(
         self,
-        model: str,
-        **kwargs: Any,
+        model: str, # 模型路径
+        **kwargs: Any, # 模型配置参数，包含yaml路径
     ) -> None:
         if "engine_args" in kwargs:
             logger.warning(
@@ -195,7 +195,7 @@ class OmniBase(PDDisaggregationMixin):
 
         if "log_requests" in kwargs:
             raise TypeError("`log_requests` has been removed in Omni/AsyncOmni. Use `log_stats`.")
-        model = omni_snapshot_download(model)
+        model = omni_snapshot_download(model) # 启动时先把模型下载到本地硬盘上(spawn到子进程的时候再加载显存)，再启动引擎
         self.__dict__["_name"] = self.__class__.__name__
         self.model = model
         self.log_stats = log_stats
@@ -224,7 +224,7 @@ class OmniBase(PDDisaggregationMixin):
             log_stats=log_stats,
             collect_stage_metrics=collect_stage_metrics,
             **kwargs,
-        )
+        ) # 先简单理解为就是启动一个“事件循环”——engine管理一个由schedual(worker)、model_execute、update的whlie循环
         self._shutdown_called = False
         self._weak_finalizer = weakref.finalize(self, _weak_shutdown_engine, self.engine)
         et = time.time()

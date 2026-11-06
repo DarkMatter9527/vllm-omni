@@ -223,7 +223,7 @@ class OmniEngineBase:
             model=model,
             trust_remote_code=bool(trust_remote_code),
             deploy_config_path=deploy_config_path,
-        )
+        ) # 确定用那一条pipline
         self.pipeline_config = pipeline_config
         self.endpoint_restrictions = pipeline_config.endpoint_restrictions if pipeline_config is not None else ()
         # The resolved deploy profile (explicit --deploy-config or the pipeline
@@ -245,7 +245,7 @@ class OmniEngineBase:
                 deploy_config_source = candidate
         if deploy_config_source is not None:
             try:
-                self.deploy_config = load_deploy_config(deploy_config_source)
+                self.deploy_config = load_deploy_config(deploy_config_source) # 把yaml改为DeployConfig
                 self._deploy_config_source = str(deploy_config_source)
             except Exception:
                 if deploy_config_path is not None:

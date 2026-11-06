@@ -1256,6 +1256,7 @@ class GPUARModelRunner(OmniGPUModelRunner, OmniConnectorModelRunnerMixin, Duplex
                 for_cudagraph_capture=runner_assisted_full_attn_capture,
             )
 
+            """ 1. 模型对输出的数据进行处理 """
             (
                 input_ids,
                 inputs_embeds,
@@ -1263,7 +1264,7 @@ class GPUARModelRunner(OmniGPUModelRunner, OmniConnectorModelRunnerMixin, Duplex
                 intermediate_tensors,
                 model_kwargs,
                 ec_connector_output,
-            ) = self._preprocess(scheduler_output, num_tokens_padded, intermediate_tensors)
+            ) = self._preprocess(scheduler_output, num_tokens_padded, intermediate_tensors) # 复用gpu_npu_runner的preprocess
 
         # Let the model adjust inputs before forward (e.g. restore input_ids
         # for multimodal position detection, fix decode position offsets).
@@ -1312,7 +1313,8 @@ class GPUARModelRunner(OmniGPUModelRunner, OmniConnectorModelRunnerMixin, Duplex
                     defer_finalize=defer_kv_connector_finalize,
                 ) as kv_connector_output,
             ):
-                model_output = self._model_forward(
+                """ 2. 模型前向处理得到组后一层隐状态 """
+                model_output = self._model_forward( # 调用gpu_model_runner的_model_forward
                     input_ids=input_ids,
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
@@ -1415,6 +1417,7 @@ class GPUARModelRunner(OmniGPUModelRunner, OmniConnectorModelRunnerMixin, Duplex
                     logits = None
                 else:
                     # Try with sampling_metadata first; fall back to without for models that don't support it
+                    """ 3. 计算logits """
                     try:
                         logits = self.model.compute_logits(
                             sample_hidden_states, sampling_metadata=self.input_batch.sampling_metadata

@@ -215,7 +215,7 @@ def get_custom_voice_query(use_batch_sample: bool = False) -> QueryResult:
         }
 
         inputs = {
-            "prompt_token_ids": [0] * _estimate_prompt_len(additional_information, model_name), # 占位符，用于分配KV Cache
+            "prompt_token_ids": [0] * _estimate_prompt_len(additional_information, model_name), # 占位符，用于分配KV Cache, 返回40
             "additional_information": additional_information, # 文本、指令信息
         }
     return QueryResult(
@@ -358,16 +358,16 @@ query_map = {
 
 def _build_inputs(args) -> tuple[str, list]:
     """Resolve model name and inputs list from CLI args."""
-    if args.batch_size < 1 or (args.batch_size & (args.batch_size - 1)) != 0:
+    if args.batch_size < 1 or (args.batch_size & (args.batch_size - 1)) != 0: # batch是不是偶数，偶数对运行有利
         raise ValueError(
             f"--batch-size must be a power of two (got {args.batch_size}); "
             "non-power-of-two values do not align with CUDA graph capture sizes "
             "of Code2Wav."
-        )
+        ) # (args.batch_size & (args.batch_size - 1)) 清除 x 二进制里最低的那个 1
 
-    query_func = query_map[args.query_type] # 通过映射字典找到封装query方法
+    query_func = query_map[args.query_type] # query_map函数映射字典
     if args.query_type in {"CustomVoice", "VoiceDesign"}:
-        query_result = query_func(use_batch_sample=args.use_batch_sample)
+        query_result = query_func(use_batch_sample=args.use_batch_sample) # QueryResult(inputs={'prompt_token_ids': [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 'additional_information': {'task_type': ['CustomVoice'], 'text': ['哥哥，你回来啦，人家等了你好久好久了，要抱抱！'], 'language': ['Chinese'], 'speaker': ['Vivian'], 'instruct': ['用特别愤怒的语气说'], 'max_new_tokens': [2048], 'full_utterance_decode': [True]}}, model_name='Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice')
     elif args.query_type == "Base":
         query_result = query_func(use_batch_sample=args.use_batch_sample, mode_tag=args.mode_tag)
     else:
@@ -412,21 +412,23 @@ def _save_wav(output_dir: str, request_id: str, mm: dict) -> None:
 # 非流式主逻辑
 def main(args):
     """Run offline inference with Omni."""
-    model_name, inputs = _build_inputs(args) # 模型名称、输入信息(占位信息,输入文本和指令)
 
-    output_dir = args.output_dir # 输出路径
+    model_name, inputs = _build_inputs(args) # 模型名称、输入信息(占位信息,输入文本和指令)
+ 
+    output_dir = args.output_dir # 输出路径:'output_audio'
     os.makedirs(output_dir, exist_ok=True)
 
     # 实例化omni，启动omni框架
-    omni_kwargs = vars(args).copy() # 转成字典
+    omni_kwargs = vars(args).copy() # 转成参数字典
     # Override CLI --model with the derived model_name.
     omni_kwargs["model"] = model_name
     # 调试用：放大 stage 启动超时，避免断点停太久被父进程判定"启动失败"后杀掉整个 pipeline
     omni_kwargs["stage_init_timeout"] = 3600 # 单 stage 初始化握手超时(默认300s)
     omni_kwargs["init_timeout"] = 7200 # orchestrator 总启动超时(默认600s,内含所有 stage 初始化)
+
     omni = Omni(**omni_kwargs) # 初始化多阶段引擎 —`Omni(**kwargs)` 构造时创建`AsyncOmniEngine` ，由`StageRuntime` 把 pipeline 的每个 stage（如 Qwen3-TTS 的 talker、code2wav）拉起为独立 vLLM 引擎子进程，注册进`StagePool` 统一管理，stage 间通过 connector（如共享内存）传递中间结果
      
-    batch_size = args.batch_size
+    batch_size = args.batch_size # 1
 
     # 获取每一个batch来进行处理
     for batch_start in range(0, len(inputs), batch_size):
@@ -439,7 +441,7 @@ def main(args):
 
         # stage_outputs是最后一个stage返回的结果，也就是所有stage处理完成后的结果
         for stage_outputs in omni.generate(batch): # generate驱动整个pipline:把输入逐个stage送入进去，每一个stage得到一个输出OmniRequestOutput
-            output = stage_outputs 
+            output = stage_outputs # OmniRequestOutput
 
             # 将何处成语音写入目标文件
             _save_wav(output_dir, output.request_id, output.outputs[0].multimodal_output)
@@ -447,7 +449,7 @@ def main(args):
 
 async def main_streaming(args):
     """Run offline inference with AsyncOmni, logging each audio chunk as it arrives."""
-    model_name, inputs = _build_inputs(args)
+    model_name, inputs = _build_inputs(args)   # 构建参数
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
@@ -604,8 +606,8 @@ def parse_args():
 
 
 if __name__ == "__main__":
-    args = parse_args() # 添加参数
+    args = parse_args() # 1. 获取参数(作为属性存储在args中)
     if args.streaming:
-        asyncio.run(main_streaming(args))
+        asyncio.run(main_streaming(args)) # 2. 异步执行
     else:
         main(args)

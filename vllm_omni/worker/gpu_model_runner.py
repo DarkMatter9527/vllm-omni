@@ -1958,7 +1958,7 @@ class OmniGPUModelRunner(PrefixCacheRunnerMixin, GPUModelRunner):
                 flush_decode_batch()
 
                 embed_slice = inputs_embeds[s:e] if inputs_embeds is not None else None
-                req_input_ids, req_embeds, update_dict = self.model.preprocess(
+                req_input_ids, req_embeds, update_dict = self.model.preprocess( # 调用模型自己的preprocess
                     input_ids=preprocess_input_ids[s:e],
                     input_embeds=embed_slice,
                     **req_infos,
@@ -1996,7 +1996,7 @@ class OmniGPUModelRunner(PrefixCacheRunnerMixin, GPUModelRunner):
 
             # run talker mtp decode
             if self.has_talker_mtp:
-                self._talker_mtp_forward(decode_req_ids, inputs_embeds, decode_start_offsets)
+                self._talker_mtp_forward(decode_req_ids, inputs_embeds, decode_start_offsets) # 函数内条用模型的talk_mtp   
 
         return (
             input_ids,
@@ -2205,7 +2205,7 @@ class OmniGPUModelRunner(PrefixCacheRunnerMixin, GPUModelRunner):
             )
 
         try:
-            model_output = super()._model_forward(
+            model_output = super()._model_forward( # 调用父类GPUModelRunner的_model_forward
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,

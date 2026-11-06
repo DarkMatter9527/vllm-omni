@@ -45,7 +45,7 @@ from .config import OmniModelConfig
 # take precedence.
 from . import env_override as _env_override  # isort:skip # noqa: F401, E402
 
-
+# __all__找不到名字的时候，它是最后的替补守门员
 def __getattr__(name: str):
     # Lazy import for AsyncOmni and Omni to avoid pulling in heavy
     # dependencies (vllm model_loader → fused_moe → pynvml) at package
@@ -62,7 +62,7 @@ def __getattr__(name: str):
         return Omni
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-
+# 只有写在清单上的东西，才是推荐给外面人直接拿出来用的
 __all__ = [
     "__version__",
     "__version_tuple__",

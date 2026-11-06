@@ -130,6 +130,9 @@ class Omni(OmniBase):
         sampling_params_list: Sequence[OmniSamplingParams],
         use_tqdm: bool | Callable[..., tqdm] = True,
     ) -> Generator[OmniRequestOutput, None, None]:
+        """整体就是一个事件循环"""
+
+
         try:
             """1. 配置采样参数"""
             sampling_params_list = self._maybe_force_final_only_for_llm_stages(sampling_params_list) # 没有显式要求流式输出的时候，强制所有 LLM 类型的 stage 只输出最终结果，不输出中间过程

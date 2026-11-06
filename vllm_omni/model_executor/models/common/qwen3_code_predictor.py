@@ -1424,7 +1424,7 @@ class CodePredictorWrapper(nn.Module):
             if not self._short_kv_enabled:
                 self._kv_buf[:, :, :padded_bsz].zero_()
             kv_caches = self._kv_views(padded_bsz)
-        # Autoregressive loop: predict layers 1..G-1
+        # Autoregressive loop: predict layers 1..G-1 循环主逻辑
         for step in range(1, num_groups): # 算 logits → 采样出第`step` 个码code → code向量存进`all_codes[:, step]`
             if kv_caches is not None:
                 # Step 1 runs positions 0-1; later steps append one position.
