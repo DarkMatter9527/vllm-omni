@@ -148,7 +148,8 @@ def get_custom_voice_query(use_batch_sample: bool = False) -> QueryResult:
         QueryResult with Omni inputs and the CustomVoice model path.
     """
     task_type = "CustomVoice"
-    model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    # model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    model_name = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
     if use_batch_sample:
         texts = [
             "其实我真的有发现，我是一个特别善于观察别人情绪的人。",
@@ -462,7 +463,7 @@ def parse_args():
     parser.add_argument(
         "--stage-init-timeout",
         type=int,
-        default=300,
+        default=60000,
         help="Timeout for initializing a single stage in seconds (default: 300)",
     )
     parser.add_argument(
@@ -474,7 +475,7 @@ def parse_args():
     parser.add_argument(
         "--init-timeout",
         type=int,
-        default=300,
+        default=60000,
         help="Timeout for initializing stages in seconds (default: 300)",
     )
     parser.add_argument(

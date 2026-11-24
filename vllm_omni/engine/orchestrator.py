@@ -3712,6 +3712,7 @@ class Orchestrator(OrchestratorBase):
 
     async def _dispatch_message(self, msg: EngineQueueMessage) -> bool:
         # Callers can edit a run payload's type field, so route it by class.
+        """管理stage路由与资源释放"""
         if isinstance(msg, NextStageInputMessage):
             await self._handle_next_stage_input(msg)
             return True

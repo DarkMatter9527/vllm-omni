@@ -854,7 +854,7 @@ class OmniModelState(DefaultModelState):
 
             ids_slice = input_ids[start : start + n_tok]
             emb_slice = embeds[start : start + n_tok]
-            new_ids, new_emb, updates = self.model.preprocess(ids_slice, emb_slice, **info)
+            new_ids, new_emb, updates = self.model.preprocess(ids_slice, emb_slice, **info) # OmniModelState
 
             # Write back in-place
             seg = min(n_tok, new_ids.shape[0])

@@ -298,7 +298,7 @@ class StageEngineCoreProc(EngineCoreProc):
                 *args,
                 engine_index=dp_rank,
                 **kwargs,
-            )
+            ) # 启动stage引擎
 
             # Each subprocess corresponds to exactly one omni replica with
             # its own OmniMasterServer allocation, so the heartbeat client
@@ -336,7 +336,7 @@ class StageEngineCoreProc(EngineCoreProc):
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
 
-            engine_core.run_busy_loop()
+            engine_core.run_busy_loop() # 忙循环处理请求
 
         except SystemExit:
             logger.debug("StageEngineCoreProc exiting.")

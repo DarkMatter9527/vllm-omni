@@ -1,0 +1,113 @@
+# Qwen3-TTS debug overlay: talker -> code2wav via shared-memory chunk
+# streaming, same two-stage topology as qwen3_tts.yaml.
+#
+# Debug-only differences from qwen3_tts.yaml (do not use for benchmarking):
+#   * max_num_seqs=1 on both stages so a request never shares a batch.
+#   * enforce_eager=true on both stages so CUDA graphs do not hide Python
+#     frames from the debugger (this also disables Code2Wav's inner graph).
+#   * decode_batch_max_size=1 on the shared-memory connector.
+# Everything else (connector streaming knobs, sampling params, platform
+# sections) mirrors qwen3_tts.yaml.
+model_runner: v2
+async_chunk: true
+
+connectors:
+  connector_of_shared_memory:
+    name: SharedMemoryConnector
+    extra:
+      decode_streaming: false
+      talker_first_audio: true
+      codec_streaming: true
+      connector_get_sleep_s: 0.01
+      connector_get_max_wait_first_chunk: 3000
+      connector_get_max_wait: 300
+      # Must match the decoder sliding attention window.
+      codec_chunk_frames: 25
+      codec_left_context_frames: 72
+      # Emit only the first audio chunk early, then return to codec_chunk_frames.
+      initial_codec_chunk_frames: 1
+      # Debug: a single in-flight request needs only one decode batch bucket.
+      decode_batch_max_size: 1
+
+stages:
+  - stage_id: 0
+    max_num_seqs: 1
+    # 6 GiB laptop GPU: 0.5 * 6 GiB ~= 3 GiB, enough for the 2.14 GiB talker
+    # weights plus a 4096-token KV cache.
+    gpu_memory_utilization: 0.5
+    trust_remote_code: true
+    enable_prefix_caching: false
+    async_scheduling: true
+    # Small per-step batches keep first-chunk latency low (same as production).
+    max_num_batched_tokens: 512
+    max_model_len: 4096
+    devices: "0"
+    # Debug: eager execution so breakpoints land in the talker forward pass.
+    enforce_eager: true
+    output_connectors:
+      to_stage_1: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.9
+      top_k: 50
+      max_tokens: 4096
+      min_tokens: 2
+      repetition_penalty: 1.05
+    # 0 = off; keep production default.
+    silence_ban_frames: 0
+    subtalker_sampling_params:
+      do_sample: true
+      temperature: 0.9
+      top_k: 50
+      top_p: 1.0
+
+  - stage_id: 1
+    # Decoder compute dtype on GPU/NPU; 310P requires FP16 and overrides this.
+    dtype: bfloat16
+    max_num_seqs: 1
+    # Code2Wav has no KV cache (0.22 GiB weights), so keep its budget small and
+    # leave VRAM headroom for stage 0 and any lingering debug session.
+    gpu_memory_utilization: 0.25
+    # Debug: eager also disables the inner Code2Wav CUDA graph.
+    enforce_eager: true
+    trust_remote_code: true
+    enable_prefix_caching: false
+    async_scheduling: true
+    # Prefill length is Q * num_frames (e.g. 16 * 2148 = 34368); keep
+    # headroom past 32k for correctness.
+    max_num_batched_tokens: 65536
+    max_model_len: 65536
+    devices: "0"
+    input_connectors:
+      from_stage_0: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 65536
+      repetition_penalty: 1.0
+
+platforms:
+  rocm:
+    # MRV2 is not qualified on ROCm; keep the legacy V1 runner.
+    model_runner: v1
+    stages:
+      - stage_id: 1
+        enforce_eager: true
+  npu:
+    model_runner: v2
+    stages:
+      - stage_id: 0
+        enforce_eager: false
+        compilation_config:
+          # Full decode graphs require Model Runner V2 on NPU.
+          cudagraph_mode: FULL_AND_PIECEWISE
+      - stage_id: 1
+        compilation_config:
+          cudagraph_mode: PIECEWISE
+  xpu:
+    model_runner: v1
+    stages:
+      - stage_id: 1
+        enforce_eager: true
+  musa:
+    model_runner: v1

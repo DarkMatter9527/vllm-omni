@@ -835,7 +835,7 @@ class OmniGPUModelRunner(MRv2PrefixCacheMixin, GPUModelRunner):
         # in-place to this buffer, and FULL graph replay reads the
         # updated values from the same tensor address.
         if not dummy_run:
-            self.model_state.run_preprocess(
+            self.model_state.run_preprocess( # self.是OmniARModelRunner
                 input_batch,
                 model_inputs,
                 self.req_states,

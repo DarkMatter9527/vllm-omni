@@ -1,0 +1,62 @@
+# VoxCPM2 debug overlay: single-stage AR pipeline with per-request state
+# batching, same runtime knobs as voxcpm2.yaml.
+#
+# Debug-only differences from voxcpm2.yaml (do not use for benchmarking):
+#   * max_num_seqs=1 so a request never shares a decode batch.
+#   * kv_cache_memory_bytes reduced to 512 MiB for a 6 GiB laptop GPU.
+#   * enable_unified_decode_graph=false so captured CUDA graphs do not hide
+#     Python frames from the debugger (the no-cg fused paths stay enabled).
+# Everything else (runtime_config quality knobs, sampling params, platform
+# section) mirrors voxcpm2.yaml.
+pipeline: voxcpm2
+async_chunk: false
+dtype: bfloat16
+
+stages:
+  - stage_id: 0
+    max_num_seqs: 1
+    gpu_memory_utilization: 0.9
+    # Debug: one request * max_model_len(4096) fits in 512 MiB; the 2B weights
+    # (~4 GiB bf16) already consume most of a 6 GiB card.
+    kv_cache_memory_bytes: 536870912  # 512 MiB
+    enforce_eager: true
+    trust_remote_code: true
+    enable_prefix_caching: false
+    async_scheduling: true
+    max_num_batched_tokens: 4096
+    max_model_len: 4096
+    devices: "0"
+    engine_extras:
+      hf_overrides:
+        voxcpm2_runtime_config:
+          # LocDiT generation settings affect synthesis quality. Keep the
+          # defaults unless alternative values have been validated.
+          inference_timesteps: 10
+          cfg_value: 2.0
+          cfg_cutoff_ratio: 1.0
+          enable_batched_cfm: true
+          enable_batched_vae_decode: true
+          coalesce_audio_d2h: true
+          enable_loc_dit_fused_qkv: true
+          enable_loc_dit_fused_mlp: true
+          enable_loc_dit_zero_dt_cache: true
+          enable_loc_dit_skip_qkv_contig: true
+          enable_loc_dit_reduce_overhead_no_cg: true
+          # Debug: keep the unified decode path in eager so it can be stepped.
+          enable_unified_decode_graph: false
+          unified_decode_graph_max_batch_size: 1
+          enable_batched_fsq_fusion: true
+          enable_batched_prefill_tail: true
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 4096
+      seed: 42
+      repetition_penalty: 1.0
+
+platforms:
+  # Ascend runs the AR stage on Model Runner V2. Audio stays on the packed
+  # per-request path because incremental VAE decoding needs CUDA graphs.
+  npu:
+    model_runner: v2

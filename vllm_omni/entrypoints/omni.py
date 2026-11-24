@@ -130,7 +130,7 @@ class Omni(OmniBase):
     ) -> Generator[OmniRequestOutput, None, None]:
         active_reqs: set[str] = set()
         try:
-            sampling_params_list = self._maybe_force_final_only_for_llm_stages(sampling_params_list)
+            sampling_params_list = self._maybe_force_final_only_for_llm_stages(sampling_params_list) # 获取采样参数
 
             if isinstance(prompts, str) or not isinstance(prompts, Sequence):
                 request_prompts: list[OmniPromptType] = [prompts]
@@ -184,7 +184,7 @@ class Omni(OmniBase):
             if use_tqdm:
                 tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
                 pbar = tqdm_func(total=len(request_ids), desc="Processed prompts", dynamic_ncols=True)
-
+            """事件循环"""
             while active_reqs:
                 msg = self.engine.try_get_output()
 

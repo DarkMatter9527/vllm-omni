@@ -264,7 +264,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         # batched MTP call with independent per-row streams.
         self.talker_mtp_accepts_per_row_generators = True
         self.mtp_sample_uniforms = True
-        self.mtp_sample_steps = max(0, int(self.talker_config.num_code_groups) - 1)
+        self.mtp_sample_steps = max(0, int(self.talker_config.num_code_groups) - 1) # 剩下的层由MTP补齐
         self.mtp_sample_vocab_size = self._codebook_vocab_size
         self.use_async_omni_output = True
         self.eager_omni_postprocess_before_async_output = True
@@ -487,7 +487,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             logger.info("Loaded %d precomputed Qwen3-TTS custom voice profile(s) from %s", loaded, custom_voice_dir)
 
     # -------------------- vLLM required hooks --------------------
-
+    
     def embed_input_ids(self, input_ids: torch.Tensor, **_: Any) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
@@ -796,7 +796,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
     # -------------------- preprocess / postprocess --------------------
 
     def preprocess(
-        self,
+        self, # 是qwen3-tts模型
         input_ids: torch.Tensor,
         input_embeds: torch.Tensor | None,
         **info_dict: Any,
@@ -1212,7 +1212,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             device=device,
         )
 
-    def preprocess_prefill_rows_mrv2(
+    def preprocess_prefill_rows_mrv2( # MRv2的prefill 快速路径 ：一次 kernel 把所有 prefill 行的输入向量写好，而不是每行单独调一次`preprocess`
         self,
         *,
         entries: Sequence[tuple[int, int, dict[str, Any]]],
@@ -1316,7 +1316,11 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
 
     @contextmanager
     def mrv2_sampling_context(self, *, req_ids: list[str], num_output_tokens: torch.Tensor) -> Iterator[None]:
-        """Scope the silence gate to sampling, never prompt-logprob computation."""
+        """
+        Scope the silence gate to sampling, never prompt-logprob computation.
+        
+        在采样这一步临时禁止模型吐静音 token，采样结束立刻解禁，避免影响 prompt 打分的计算(做评价)
+        """
         self.set_batch_req_ids(req_ids)
         self._mrv2_silence_ban_mask = None
         if self._silence_ban_frames > 0:
@@ -1373,7 +1377,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             for code, valid_len in zip(audio_codes, valid_code_lengths, strict=True)
         ]
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]: # stage引擎启动时加载模型
         self._prompt_builder._projected_token_cache.clear()
         # Consume talker weights, and conditionally consume speaker encoder
         # weights only if they are present in the checkpoint.
@@ -1463,7 +1467,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             logger.info("Qwen3-TTS Talker stream decode enabled (%d slots)", slots)
         return loaded
 
-    def capture_stream_decode_graphs(self, batch_sizes: list[int]) -> None:
+    def capture_stream_decode_graphs(self, batch_sizes: list[int]) -> None: # 只把已经确定的一串 kernel launch 录成录像带，以后按快进键播放，不改任何计算逻辑 ，就是把 eager 执行的过程原样录制下来，不是计算图
         if self.stream_decoder is None or self.stream_graphs is not None:
             return
         from .tokenizer_12hz.streaming_decoder import StreamingDecodeGraphs
@@ -1502,15 +1506,24 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             )
 
     def get_stream_ref_context(self, info: OmniPayload) -> torch.Tensor | None:
-        """Model-owned reference-code layout and context boundary for a PCM slot."""
+        """
+        Model-owned reference-code layout and context boundary for a PCM slot.
+        
+        从请求中取出参考音频的codec codec，并截出预热在最后N帧
+        """
         codes = info.get("codes")
         ref = codes.get("ref") if isinstance(codes, dict) else None
         if not isinstance(ref, torch.Tensor) or not ref.numel():
             return None
-        return ref.reshape(-1, int(self.talker_config.num_code_groups))[-self.stream_ref_context_frames :]
+        return ref.reshape(-1, int(self.talker_config.num_code_groups))[-self.stream_ref_context_frames :] # reshape后从[帧数，码本数量]取出最后N帧
 
     def prime_stream_decoder(self, primes: list[tuple[int, torch.Tensor]]) -> None:
-        """Prime equal-length reference groups without padding or aliasing live slots."""
+        """
+        Prime equal-length reference groups without padding or aliasing live slots.
+        
+        语音克隆时，请求带一段参考音频（ref audio）。生成前要先把这段参考 code 喂给 codec 解码器跑一遍，
+        让解码器的内部状态（卷积/RNN 缓存）停在参考音频的末尾。这样后续生成的新帧就是 接着参考音频往下解码 ，音色才连贯。
+        """
         if not primes:
             return
         stream = self.stream_decoder
@@ -1698,7 +1711,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             top_p = float(subtalker_params.get("top_p", 1.0))
 
         audio_codes = self.code_predictor(
-            layer0_code=input_ids.reshape(bsz, 1),
+            layer0_code=input_ids.reshape(bsz, 1), # input_ids就是上一步采样的layer0，作为layer0_code喂给code_predictor
             layer0_embed=last_id_hidden,
             last_talker_hidden=past_hidden,
             do_sample=do_sample,
@@ -1726,15 +1739,16 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         inputs_embeds_out = (summed + text_step).reshape(bsz, -1)
         return inputs_embeds_out, audio_codes.to(dtype=torch.long)
 
+    # 是实现的能力是一样的，而不同的MR有不同的名字
+    # 如都是实现mtp，talker_mtp是v1的名字，而mtp是v2中的名字
     # MRV2 capability names read the V1 canonical values so platform patches
     # such as the NPU 310P graph-safety override apply to both runners.
-    mtp = talker_mtp
+    mtp = talker_mtp 
     get_mtp_seed = staticmethod(get_tts_local_seed)
-
     # Postprocess only stores the last hidden for the deferred decode MTP.
     eager_frames_need_postprocess = False
 
-    def eager_decode_settled(self, info: dict[str, Any]) -> bool:
+    def eager_decode_settled(self, info: dict[str, Any]) -> bool: # 判断某条请求的decode是否已经稳定
         """Decode preprocess is a no-op for this row: its trailing text is spent.
 
         From then on every decode step feeds the frame embedding plus the pad
@@ -1747,27 +1761,27 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         offset = meta.get("talker_text_offset", 0) if isinstance(meta, dict) else 0
         return isinstance(tail, torch.Tensor) and tail.numel() == 0 and not offset
 
-    def eager_settled_text_step(self) -> torch.Tensor:
+    def eager_settled_text_step(self) -> torch.Tensor: # 稳定后每步加固定的text向量
         return self._tts_pad_embed.reshape(1, -1)
 
-    def capture_first_frame_graphs(self) -> None:
+    def capture_first_frame_graphs(self) -> None: # 真图捕获阶段让first_frame_decode自己抓CUDA Graph
         # Set by load_weights when talker_first_audio_enabled accepts the connector option.
         decoder = getattr(self, "first_frame_decoder", None)
         if decoder is not None:
-            decoder.capture()
+            decoder.capture() 
 
-    def mtp_frame_valid(self, layer0: torch.Tensor) -> torch.Tensor:
+    def mtp_frame_valid(self, layer0: torch.Tensor) -> torch.Tensor: # 判断Talker预测的layer0是否是合法codec_id
         """Rows whose CB0 is a codec id rather than EOS/special; matches decode preprocess."""
-        return (layer0 >= 0) & (layer0 < self._codebook_vocab_size)
+        return (layer0 >= 0) & (layer0 < self._codebook_vocab_size) 
 
     @property
-    def mtp_output_key(self) -> tuple[str, str]:
-        return self.talker_mtp_output_key
+    def mtp_output_key(self) -> tuple[str, str]: # 声明输出存在codec和audio两个字段  
+        return self.talker_mtp_output_key 
 
     @property
-    def mtp_graph_safe(self) -> bool:
-        return self.talker_mtp_graph_safe
+    def mtp_graph_safe(self) -> bool: # 说明MTP可以被CUDA Graph包住
+        return self.talker_mtp_graph_safe 
 
     @property
-    def mtp_accepts_per_row_generators(self) -> bool:
-        return self.talker_mtp_accepts_per_row_generators
+    def mtp_accepts_per_row_generators(self) -> bool: # mtp对每个请求可以使用自己的随机种子
+        return self.talker_mtp_accepts_per_row_generators 
