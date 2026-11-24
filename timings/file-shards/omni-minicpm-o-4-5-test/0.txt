@@ -1,0 +1,1 @@
+tests/e2e/offline_inference/test_minicpmo_4_5.py

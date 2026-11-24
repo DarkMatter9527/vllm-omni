@@ -23,7 +23,9 @@ Test pipeline mode (e.g. test-merge.yml, test-nightly.yml, test-weekly.yml):
     matches a job-key prefix; unrelated files must not reduce fallback coverage.
     List used shared helpers in job dependencies so mixed diffs retain their consumers.
   - Expand uploader-only ``mirror_hardwares`` into ``agents`` (+ optional ``image``
-    for NPU) + ``plugins`` + ``retry`` (see ci_mirror_hardwares.yml).
+    for NPU) + ``plugins`` + ``retry`` (see ci_mirror_hardwares.yml). An NPU
+    preset also appends its ``image-build-*`` step key to ``depends_on`` so the
+    job starts as soon as that image is pushed, not after every NPU image.
   - ``automatic_shard: true`` is uploader-only. Before planning, the uploader
     tries to build a per-step profile from recent passed ``timings/jobs``
     artifacts (or ``VLLM_OMNI_SHARD_TIMINGS``). Ready excludes ``main`` and uses
@@ -83,6 +85,7 @@ from ci_conditions import (
     MERGE_UPLOAD_IF,
     NIGHTLY_LABEL_IF,
     NIGHTLY_MAIN_IF,
+    NPU_PRESET_IMAGE_BUILD_KEYS,
     READY_LABEL_IF,
     READY_UPLOAD_IF,
     ROOT,
@@ -552,6 +555,23 @@ def _resolve_mirror_hardware_name(hardware: Any, *, step_label: str) -> str | No
     return name
 
 
+def _npu_image_build_key(preset_name: str) -> str | None:
+    """Return the bootstrap image-build step key for an NPU preset, if any."""
+    return NPU_PRESET_IMAGE_BUILD_KEYS.get(preset_name.split("_", 1)[0].lower())
+
+
+def _add_step_dependency(step: dict[str, Any], key: str) -> None:
+    """Append *key* to ``depends_on`` (string or list, dict entries preserved)."""
+    deps = step.get("depends_on")
+    if deps is None:
+        step["depends_on"] = [key]
+        return
+    deps = [deps] if isinstance(deps, str) else list(deps)
+    if key not in deps:
+        deps.append(key)
+    step["depends_on"] = deps
+
+
 def _expand_mirror_hardwares(step: dict[str, Any]) -> dict[str, Any] | None:
     """Replace ``mirror_hardwares`` (or infer it from ``-m``) with preset agents/plugins.
 
@@ -559,6 +579,8 @@ def _expand_mirror_hardwares(step: dict[str, Any]) -> dict[str, Any] | None:
     Omitted key: match H100/L4 (or ``MIRROR_HW``) in ``-m``, then compose
     ``{chip}_{n}`` from ``cards_n``. No match skips the step. Steps with no
     SKU/cards and no ``mirror_hardwares`` are left unchanged (CPU jobs).
+    NPU presets also depend on the ``image-build-*`` step that pushes their
+    ``image`` tag, so a fast image build unblocks its tests immediately.
 
     Returns None when the current ``MIRROR_HW`` selector does not apply.
     """
@@ -595,6 +617,9 @@ def _expand_mirror_hardwares(step: dict[str, Any]) -> dict[str, Any] | None:
 
     expanded = copy.deepcopy(preset)
     merged = {key: value for key, value in step.items() if key != "mirror_hardwares"} | expanded
+    image_build_key = _npu_image_build_key(preset_name)
+    if image_build_key is not None:
+        _add_step_dependency(merged, image_build_key)
     # A scheduled build's HF_TOKEN may override a pod env entry with the same
     # name. The preset injects the Kubernetes secret under a collision-proof
     # alias; restore the conventional name after Buildkite has merged env.

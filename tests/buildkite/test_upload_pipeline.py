@@ -15,7 +15,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / ".buildkite" / "common" / "scripts"))
 
-from ci_conditions import NIGHTLY_LABEL_IF, RELEASE_LINE_BUILDKITE_PATTERN  # noqa: E402
+from ci_conditions import NIGHTLY_LABEL_IF, NPU_PRESET_IMAGE_BUILD_KEYS, RELEASE_LINE_BUILDKITE_PATTERN  # noqa: E402
 from skip_ci import resolve_ci_decision  # noqa: E402
 from upload_pipeline import (  # noqa: E402
     CUDA_HF_TOKEN_EXPORT,
@@ -110,6 +110,24 @@ def test_bootstrap_steps_loaded_from_file() -> None:
     assert "key: image-build" in steps
     assert "key: upload-ready-pipeline" in steps
     assert "placeholder:" not in steps
+
+
+def test_npu_bootstrap_uploads_do_not_wait_for_every_image() -> None:
+    """Each NPU test job waits for its own image build, so uploads start immediately."""
+    doc = yaml.safe_load(Path(".buildkite/npu/bootstrap-upload-steps.yml").read_text(encoding="utf-8"))
+    by_key = {step["key"]: step for step in doc["steps"]}
+    assert "depends_on" not in by_key["upload-ready-pipeline"]
+    assert "depends_on" not in by_key["upload-nightly-pipeline"]
+
+
+def test_npu_preset_image_build_keys_match_bootstrap_steps() -> None:
+    doc = yaml.safe_load(Path(".buildkite/npu/bootstrap-upload-steps.yml").read_text(encoding="utf-8"))
+    uploaded = {step["key"] for step in doc["steps"]}
+    assert set(NPU_PRESET_IMAGE_BUILD_KEYS.values()) <= uploaded
+    for name in _load_mirror_hardwares():
+        prefix = name.split("_", 1)[0]
+        if prefix in NPU_PRESET_IMAGE_BUILD_KEYS:
+            assert NPU_PRESET_IMAGE_BUILD_KEYS[prefix] in uploaded
 
 
 def test_docs_only_allows_main_scheduled_nightly_weekly_only() -> None:
@@ -294,10 +312,54 @@ def test_mirror_hardwares_a2b3_npu_4_expands_agents_image_and_plugins() -> None:
     assert step["agents"]["queue"] == "ascend-a2b3"
     assert step["agents"]["resource_class"] == "npu-4"
     assert step["image"].endswith("${BUILDKITE_COMMIT}")
+    assert step["depends_on"] == ["image-build-a2"]
     assert step["plugins"][0]["kubernetes"]["podSpecPatch"]["imagePullSecrets"] == [
         {"name": "swr-secret"},
     ]
     assert step["commands"] == ["pytest -sv tests/example"]
+
+
+@pytest.mark.parametrize(
+    ("preset", "build_key"),
+    [
+        ("a2b3_npu_1", "image-build-a2"),
+        ("a3_npu_2", "image-build-a3"),
+        ("a3_npu_16", "image-build-a3"),
+        ("a5_npu_4", "image-build-a5"),
+        ("310p_npu_1", "image-build-310p"),
+    ],
+)
+def test_npu_mirror_hardwares_wait_only_for_its_own_image_build(preset: str, build_key: str) -> None:
+    step = _expand_mirror_hardwares(
+        {"label": preset, "mirror_hardwares": preset, "commands": ["pytest -sv tests/example"]},
+    )
+    assert step is not None
+    assert step["depends_on"] == [build_key]
+
+
+def test_npu_mirror_hardwares_keeps_explicit_depends_on() -> None:
+    step = _expand_mirror_hardwares(
+        {
+            "label": "NPU accuracy",
+            "mirror_hardwares": "a3_npu_2",
+            "depends_on": ["capture-inputs", {"step": "prepare", "allow_failure": True}],
+            "commands": ["pytest -sv tests/example"],
+        },
+    )
+    assert step is not None
+    assert step["depends_on"] == [
+        "capture-inputs",
+        {"step": "prepare", "allow_failure": True},
+        "image-build-a3",
+    ]
+
+
+def test_cuda_mirror_hardwares_do_not_gain_image_build_dependency() -> None:
+    step = _expand_mirror_hardwares(
+        {"label": "L4 job", "mirror_hardwares": "l4_1", "commands": ["pytest -sv tests/example"]},
+    )
+    assert step is not None
+    assert "depends_on" not in step
 
 
 def test_all_cuda_mirror_hardwares_restore_hf_token_at_runtime() -> None:
@@ -1584,7 +1646,9 @@ def test_lingbot_nightly_uses_independent_perf_and_accuracy_frameworks(monkeypat
     }
     perf = jobs[f"lingbot-{platform}-nightly-performance"]
     accuracy = jobs[f"lingbot-{platform}-nightly-accuracy"]
-    assert not perf.get("depends_on")
+    # Perf must not chain behind the accuracy jobs; the only upstream it may
+    # have is the image build its own hardware preset pulls.
+    assert all(dep == "image-build-a2" for dep in perf.get("depends_on") or [])
     assert not perf.get("matrix")
     command = " ".join(perf["commands"])
     assert "tests/dfx/perf/scripts/run_benchmark.py" in command

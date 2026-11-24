@@ -1,7 +1,9 @@
 # Uploader-only hardware presets for CUDA / NPU test YAML.
 # Referenced as ``mirror_hardwares: l4_1`` on a step; ``upload_pipeline.py`` expands to
 # ``agents`` (+ optional top-level ``image`` for NPU) + ``plugins`` + ``retry``,
-# then strips ``mirror_hardwares`` before Buildkite upload.
+# then strips ``mirror_hardwares`` before Buildkite upload. An NPU preset also
+# appends its bootstrap ``image-build-*`` step key to ``depends_on``, so a test
+# starts when its own image is pushed rather than after all NPU images.
 # Every preset keeps a manual Retry button after a green job, and reruns once
 # when the agent is lost or stopped. Pytest failures
 # (exit 1) and OOM (137) are not retried. CPU steps do not use these presets

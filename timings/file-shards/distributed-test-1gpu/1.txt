@@ -1,0 +1,15 @@
+tests/distributed/omni_connectors/test_mooncake_transfer_engine_buffer.py
+tests/distributed/omni_connectors/test_bagel_mooncake_connector.py
+tests/distributed/omni_connectors/test_chunk_transfer_adapter.py
+tests/distributed/omni_connectors/test_kv_recv_tp_consensus.py
+tests/distributed/omni_connectors/test_nixl_connector_native.py
+tests/distributed/omni_connectors/test_shm_connector.py
+tests/distributed/omni_coordinator/test_omni_coord_client_for_hub.py
+tests/distributed/test_mooncake_connector.py
+tests/distributed/weight_sharing/test_backend.py
+tests/distributed/weight_sharing/test_cuda_ipc_allocators.py
+tests/distributed/weight_sharing/test_hunyuan_image3_adapter.py
+tests/distributed/weight_sharing/test_provider_runner.py
+tests/distributed/weight_sharing/test_sharing_runtime.py
+tests/distributed/weight_sharing/test_weight_sharing_contracts.py
+tests/distributed/weight_sharing/test_worker_startup.py

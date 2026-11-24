@@ -1,0 +1,15 @@
+tests/distributed/omni_connectors/test_mooncake_tcp_completion.py
+tests/distributed/omni_connectors/test_adapter_and_flow.py
+tests/distributed/omni_connectors/test_basic_connectors.py
+tests/distributed/omni_connectors/test_kv_flow.py
+tests/distributed/omni_connectors/test_nixl_connector.py
+tests/distributed/omni_connectors/test_per_sample_kv.py
+tests/distributed/omni_coordinator/test_load_balancer.py
+tests/distributed/omni_coordinator/test_omni_coordinator.py
+tests/distributed/test_mooncake_thinker_captures.py
+tests/distributed/weight_sharing/test_cuda_ipc.py
+tests/distributed/weight_sharing/test_cuda_ipc_pairing.py
+tests/distributed/weight_sharing/test_npu_ipc.py
+tests/distributed/weight_sharing/test_shared_postload_cuda.py
+tests/distributed/weight_sharing/test_torch_npu_ipc_codec.py
+tests/distributed/weight_sharing/test_worker_registry.py

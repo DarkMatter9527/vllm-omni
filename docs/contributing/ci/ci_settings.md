@@ -138,7 +138,7 @@ Canonical layout (prefer these paths for new changes):
 
 === "NPU"
 
-    **Bootstrap:** [`npu/pipeline-npu.yml`](https://github.com/vllm-project/vllm-omni/blob/main/.buildkite/npu/pipeline-npu.yml) + [`npu/bootstrap-upload-steps.yml`](https://github.com/vllm-project/vllm-omni/blob/main/.buildkite/npu/bootstrap-upload-steps.yml)—same split as CUDA; builds A2/B3, A3, A5, and 310P CI images, then uploads child test pipelines.
+    **Bootstrap:** [`npu/pipeline-npu.yml`](https://github.com/vllm-project/vllm-omni/blob/main/.buildkite/npu/pipeline-npu.yml) + [`npu/bootstrap-upload-steps.yml`](https://github.com/vllm-project/vllm-omni/blob/main/.buildkite/npu/bootstrap-upload-steps.yml)—same split as CUDA; builds A2/B3, A3, A5, and 310P CI images in parallel and uploads the child test pipelines immediately. Each test job depends only on the image build it pulls, so an image that finishes first starts its tests first instead of waiting for all four builds.
 
     **Test YAML:** `npu/test-npu-ready.yml` (L2), `test-npu-nightly.yml` (L4).
 
@@ -146,7 +146,7 @@ Canonical layout (prefer these paths for new changes):
 
     **Upload:** same as CUDA—`upload_pipeline.py --upload`.
 
-    **Hardware in YAML:** `mirror_hardwares` preset (string), expanded to `agents`, top-level `image`, and `plugins`. NPU presets in `common/ci_mirror_hardwares.yml` are:
+    **Hardware in YAML:** `mirror_hardwares` preset (string), expanded to `agents`, top-level `image`, `plugins`, and `depends_on: image-build-<hw>` (A2/B3 → `image-build-a2`, A3 → `image-build-a3`, A5 → `image-build-a5`, 310P → `image-build-310p`). NPU presets in `common/ci_mirror_hardwares.yml` are:
 
     - A2: `a2b3_npu_1`, `a2b3_npu_4`, `a2b3_npu_8`
     - A3: `a3_npu_2`, `a3_npu_4`, `a3_npu_8`, `a3_npu_16`
@@ -157,7 +157,7 @@ Canonical layout (prefer these paths for new changes):
 
     **Conventions**
 
-    - **`depends_on: upload-ready-pipeline`** (or `upload-nightly-pipeline`) ties jobs to bootstrap upload keys.
+    - **`depends_on`:** leaf jobs keep their bootstrap upload key (`upload-ready-pipeline` / `upload-nightly-pipeline`) and, for NPU, automatically gain `image-build-<hw>` from `mirror_hardwares`. Do not hand-write the image dependency; the uploader appends it and preserves any other `depends_on` entries.
     - Do not duplicate `agents` / `image` / `plugins` when using `mirror_hardwares`.
 
     **Adding a job**
@@ -607,7 +607,7 @@ CUDA **L2** (`.buildkite/cuda/test-ready.yml`), **L3** (`.buildkite/cuda/test-me
 | Key | Purpose |
 | --- | ------- |
 | `source_file_dependencies` | Named preset (or list of presets) from [`ci_source_file_dependencies.yml`](https://github.com/vllm-project/vllm-omni/blob/main/.buildkite/common/ci_source_file_dependencies.yml). The uploader expands only that key; it does **not** scan `commands`. If any changed file equals a listed prefix or starts with `prefix/`, keep the step (or group); otherwise omit it. Inline path-prefix lists are still accepted. |
-| `mirror_hardwares` | Expand to `agents` + `plugins` (+ optional `image`) from `ci_mirror_hardwares.yml`. |
+| `mirror_hardwares` | Expand to `agents` + `plugins` (+ optional `image`) from `ci_mirror_hardwares.yml`. NPU presets also add `depends_on: image-build-<hw>` so the job waits only for its own image. |
 | `automatic_shard` | CUDA ready/merge directory sweep. The uploader strips the key and may set `parallelism` from that step's timing profile. With no usable timings it uses the smaller of `MAX_AUTOMATIC_SHARDS` and the files whose marks satisfy the command's `-m`. See [Automatic shard planning](#automatic-shard-planning). |
 
 #### Automatic shard planning {#automatic-shard-planning}

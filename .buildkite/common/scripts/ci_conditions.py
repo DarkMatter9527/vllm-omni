@@ -51,6 +51,16 @@ BOOTSTRAP_UPLOAD_IF_KEYS = {
     "upload-nightly-pipeline": "nightly",
     "upload-weekly-pipeline": "weekly",
 }
+# NPU hardware preset prefix → the bootstrap image-build step that pushes the
+# image the preset pulls (``image`` tag suffix in ci_mirror_hardwares.yml).
+# upload_pipeline.py adds it to ``depends_on`` so a test job starts as soon as
+# its own image is built instead of waiting for every NPU image.
+NPU_PRESET_IMAGE_BUILD_KEYS = {
+    "a2b3": "image-build-a2",
+    "a3": "image-build-a3",
+    "a5": "image-build-a5",
+    "310p": "image-build-310p",
+}
 E2E_GROUP_MARKER = "E2E Test"
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
 CI_MIRROR_HARDWARES_PATH = ROOT / ".buildkite/common/ci_mirror_hardwares.yml"

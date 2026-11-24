@@ -1,0 +1,14 @@
+tests/distributed/omni_connectors/test_mooncake_transfer_engine_rdma.py
+tests/distributed/omni_connectors/test_bagel_shared_memory_connector.py
+tests/distributed/omni_connectors/test_kv_async_prefetch.py
+tests/distributed/omni_connectors/test_lazy_mooncake_import.py
+tests/distributed/omni_connectors/test_omni_connector_configs.py
+tests/distributed/omni_connectors/test_tp_rank_aware.py
+tests/distributed/omni_coordinator/test_omni_coord_client_for_stage.py
+tests/distributed/test_mooncake_hs_store.py
+tests/distributed/weight_sharing/test_consumer_runner.py
+tests/distributed/weight_sharing/test_cuda_ipc_failures.py
+tests/distributed/weight_sharing/test_hunyuan_image3_adapter_cuda.py
+tests/distributed/weight_sharing/test_shared_postload.py
+tests/distributed/weight_sharing/test_torch_cuda_ipc_codec.py
+tests/distributed/weight_sharing/test_worker_integration.py

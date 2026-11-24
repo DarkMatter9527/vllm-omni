@@ -81,12 +81,10 @@ steps:
       BUILDKITD_ADDR: "tcp://buildkitd-service.buildkitd:1234"
     command: bash .buildkite/npu/scripts/build-npu-image.sh Dockerfile.npu.ci "$${VLLM_IMAGE_TAG}" -310p
 
+  # Upload immediately instead of after every image build: each test job depends
+  # on the image build it pulls (upload_pipeline.py adds ``image-build-*`` from
+  # ``mirror_hardwares``), so a test whose image finishes first starts first.
   - label: "Upload Ready Pipeline"
-    depends_on:
-      - image-build-a2
-      - image-build-a3
-      - image-build-a5
-      - image-build-310p
     key: upload-ready-pipeline
     agents:
       queue: "medium_cpu_queue_premerge"
@@ -94,12 +92,8 @@ steps:
       python3 .buildkite/common/scripts/upload_pipeline.py --upload .buildkite/npu/test-npu-ready.yml
 
   # L4 Test — release-line+NIGHTLY=1 (scheduled), or PR nightly-test label
+  # Same per-image dependency as the ready upload; no wait for all four builds.
   - label: "Upload Nightly Pipeline"
-    depends_on:
-      - image-build-a2
-      - image-build-a3
-      - image-build-a5
-      - image-build-310p
     key: upload-nightly-pipeline
     commands:
       - |

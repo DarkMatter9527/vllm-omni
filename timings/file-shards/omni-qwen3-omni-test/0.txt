@@ -1,0 +1,2 @@
+tests/e2e/offline_inference/test_qwen3_omni.py
+tests/e2e/online_serving/test_qwen3_omni.py
