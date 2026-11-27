@@ -17,29 +17,29 @@
 #   * Stage 0 does not set enforce_eager — talker runs cudagraph by default.
 #     Stage 1 defaults to false so Code2Wav can use its inner cudagraph;
 #     set true to disable that path in eager mode.
-model_runner: v2
-async_chunk: true
+model_runner: v2  # 模型运行器版本：v2 = Model Runner V2（实验性，CUDA 上本模型的默认运行器）；v1 = 旧版运行器
+async_chunk: true  # 启用异步分块：talker 每步只解码一小块 codec 帧即经连接器发给 code2wav，降低首帧延迟
 
-connectors:
-  connector_of_shared_memory:
-    name: SharedMemoryConnector
-    extra:
+connectors:  # 声明 stage 之间传输中间数据的连接器（本部署为 talker → code2wav 的共享内存流式通道）
+  connector_of_shared_memory:  # 连接器实例名（自定义标识，供 stage 的 input/output_connectors 引用）
+    name: SharedMemoryConnector  # 连接器类型：基于共享内存的进程间传输，支撑音频码流的分块传递
+    extra:  # 该类型连接器的扩展参数
       # Opt in to the stateful streaming decoder on CUDA.
       # New ICL reference lengths trigger lazy graph capture and may increase
       # first-packet latency; warm up with representative references before measuring.
       # Continuous incremental history differs from legacy window recomputation
       # and may change WER. Validate quality on your workload before enabling.
-      decode_streaming: false
-      talker_first_audio: true
-      codec_streaming: true
-      connector_get_sleep_s: 0.01
-      connector_get_max_wait_first_chunk: 3000
-      connector_get_max_wait: 300
+      decode_streaming: false  # 是否在 CUDA 上启用有状态流式解码器（false = 关闭；开启影响见上方注释）
+      talker_first_audio: true  # talker 侧首帧优先：第一帧音频码产生后立即发出，优先保障首包延迟
+      codec_streaming: true  # codec 流式解码：code2wav 按滑动窗口增量解码码流，而非整段到齐后重算
+      connector_get_sleep_s: 0.01  # 消费端取不到数据时的轮询睡眠间隔（秒），避免忙等空耗 CPU
+      connector_get_max_wait_first_chunk: 3000  # 消费端等待首块数据的最长时间（毫秒），超时判失败
+      connector_get_max_wait: 300  # 消费端等待后续每块数据的最长时间（毫秒）
       # Must match the decoder sliding attention window.
-      codec_chunk_frames: 25
-      codec_left_context_frames: 72
+      codec_chunk_frames: 25  # 稳态每个解码块的 codec 帧数，必须与解码器滑动注意力窗口匹配
+      codec_left_context_frames: 72  # 解码时向左保留的历史上下文帧数（滑动窗口左上下文）
       # Emit only the first audio chunk early, then return to codec_chunk_frames.
-      initial_codec_chunk_frames: 1
+      initial_codec_chunk_frames: 1  # 首个音频块只发 1 帧以尽快出首包，之后恢复为 codec_chunk_frames
       # Chunk ramp (opt-in): gradual size increase for first N chunks to
       # eliminate the IC→steady cliff (1→25). Uncomment to enable.
       # Each entry is the size of that chunk index; indices past the table
@@ -72,28 +72,28 @@ connectors:
       # time and graph memory for either backend.
       # decode_cudagraph_batch_sizes: [1, 2, 4]
       # Limit eager batches to reduce temporary stateful cache allocations; CUDA Graph batching uses the buckets above.
-      decode_batch_max_size: 4
+      decode_batch_max_size: 4  # eager 模式下解码批大小上限，限制有状态缓存的临时分配；CUDA Graph 批处理用上方 bucket
 
-stages:
-  - stage_id: 0
-    max_num_seqs: 64
-    gpu_memory_utilization: 0.3
-    trust_remote_code: true
+stages:  # 流水线各 stage 的部署配置（省略字段回落到 StageDeployConfig 默认值）
+  - stage_id: 0  # Stage 0：talker（自回归文本 → 音频码生成模型）
+    max_num_seqs: 64  # 该 stage 最大并发序列数
+    gpu_memory_utilization: 0.3  # 该 stage 占用的 GPU 显存比例（30%，两个 stage 共驻一张卡）
+    trust_remote_code: true  # 允许执行远程仓库的自定义模型代码（Qwen3-TTS talker 需要）
     # Omni prefix cache (reuse of talker codec rows on shared prefixes). Off
     # by default; set true when text repeats across requests (same voice or
     # shared ref_audio). The talker opts out of hidden-state caching and
     # defers codes.audio writes, so per-step cost is small. Stage 1 (codec
     # decoder) is not a supported prefix-cache stage: keep it false there.
     # See docs/design/feature/prefix_caching.md for the stage matrix.
-    enable_prefix_caching: false
-    async_scheduling: true
+    enable_prefix_caching: false  # 是否启用 Omni 前缀缓存（复用共享前缀的 codec 行；适用场景见上方注释）
+    async_scheduling: true  # 启用 Omni 异步调度：本步采样与下一步输入准备重叠，压缩 step 间空隙
     # Bound per-step prefill work (validated MRV2 basic profile). Small
     # per-step batches keep first-chunk latency low.
-    max_num_batched_tokens: 512
-    max_model_len: 4096
-    devices: "0"
-    output_connectors:
-      to_stage_1: connector_of_shared_memory
+    max_num_batched_tokens: 512  # 每步调度的最大 token 数，限制每步 prefill 工作量以压低首帧延迟
+    max_model_len: 4096  # 该 stage 支持的最大序列长度（token 数）
+    devices: "0"  # 该 stage 使用的 GPU 设备编号（"0" = 第 0 张卡）
+    output_connectors:  # 该 stage 的输出连接器声明（key = 输出端口名，value = 连接器实例名）
+      to_stage_1: connector_of_shared_memory  # 输出端口 to_stage_1 接共享内存连接器，即发给 Stage 1 (code2wav)
     # Serving-side runaway ceiling for requests without max_new_tokens:
     # max(codec_budget_min_frames, codec_budget_frames_per_text_token *
     # input text tokens) codec frames, capped by max_tokens below. Each key
@@ -102,77 +102,77 @@ stages:
     # additional_config:
     #   codec_budget_frames_per_text_token: {Base: 12, CustomVoice: 40, VoiceDesign: 40}
     #   codec_budget_min_frames: {Base: 192, CustomVoice: 400, VoiceDesign: 400}
-    default_sampling_params:
-      temperature: 0.9
-      top_k: 50
-      max_tokens: 4096
+    default_sampling_params:  # 该 stage 请求的默认采样参数（客户端未显式指定时生效）
+      temperature: 0.9  # 采样温度 0.9：控制随机性，越高越发散
+      top_k: 50  # top-k 采样：每步仅从概率最高的 50 个 token 中采样
+      max_tokens: 4096  # 单次请求最大生成 token 数（服务端兜底上限）
       # Official qwen-tts generates the talker with min_new_tokens=2; without
       # it, checkpoints that sample codec EOS on the first frame return empty
       # audio (HTTP 400). See #4962.
-      min_tokens: 2
-      repetition_penalty: 1.05
+      min_tokens: 2  # 最少生成 token 数：防止首帧即采到 codec EOS 导致返回空音频（见 #4962）
+      repetition_penalty: 1.05  # 重复惩罚 1.05：抑制重复 token，避免 talker 陷入重复循环
     # Suppress codebook-0 silence tokens for the first N decode frames of a
     # request (#4966). Applies to every request on this stage, so intended
     # for x-vector-only (Base voice-clone) deploys. 0 = off.
-    silence_ban_frames: 0
-    subtalker_sampling_params:
-      do_sample: true
-      temperature: 0.9
-      top_k: 50
-      top_p: 1.0
+    silence_ban_frames: 0  # 请求前 N 个解码帧内禁止 codebook-0 静音 token（0 = 关闭；用途见上方注释）
+    subtalker_sampling_params:  # 子 talker（code_predictor 残差码本预测器，每步并行预测其余码本）的采样参数
+      do_sample: true  # 是否对残差码本采样（true = 采样；false = 贪心取 argmax）
+      temperature: 0.9  # 残差码本采样温度
+      top_k: 50  # 残差码本 top-k 采样
+      top_p: 1.0  # 残差码本 nucleus 阈值：1.0 = 不截断
 
-  - stage_id: 1
+  - stage_id: 1  # Stage 1：code2wav（音频 codec 解码器，把 talker 码流合成波形）
     # Decoder compute dtype on GPU/NPU; 310P requires FP16 and overrides this.
-    dtype: bfloat16
+    dtype: bfloat16  # 解码器计算精度：bfloat16（310P 强制 FP16 会覆盖此项）
     # Tuned for Base voice clone; CustomVoice / VoiceDesign are TTFA-optimal at 1.
-    max_num_seqs: 64
-    gpu_memory_utilization: 0.3
-    enforce_eager: false
-    trust_remote_code: true
-    enable_prefix_caching: false
-    async_scheduling: true
+    max_num_seqs: 64  # 最大并发序列数（针对 Base 声音克隆调优；CustomVoice/VoiceDesign 以 1 为最优）
+    gpu_memory_utilization: 0.3  # 该 stage 显存占比（30%，与 Stage 0 共驻一张卡）
+    enforce_eager: false  # false = 允许 Code2Wav 使用内部 CUDA Graph 加速；true = 纯 eager 执行
+    trust_remote_code: true  # 允许执行远程仓库的自定义模型代码
+    enable_prefix_caching: false  # 必须为 false：codec 解码器不支持前缀缓存（见 Stage 0 上方说明）
+    async_scheduling: true  # 启用 Omni 异步调度
     # Must be divisible by num_code_groups and cover (left_context + chunk).
     # Prefill length is Q * num_frames (e.g. 16 * 2148 = 34368); keep
     # headroom past 32k.
-    max_num_batched_tokens: 65536
+    max_num_batched_tokens: 65536  # 每步调度最大 token 数：codec prefill 长度 Q*num_frames 超过 32k 默认上限，故调大
     # async_chunk appends windows per step; max_model_len must cover the
     # accumulated flat codec stream.
-    max_model_len: 65536
-    devices: "0"
-    input_connectors:
-      from_stage_0: connector_of_shared_memory
-    default_sampling_params:
-      temperature: 0.0
-      top_p: 1.0
-      top_k: -1
-      max_tokens: 65536
-      repetition_penalty: 1.0
+    max_model_len: 65536  # 最大序列长度：须容纳每步追加滑动窗口后累积的完整 codec 流
+    devices: "0"  # 使用的 GPU 设备编号（与 Stage 0 同卡）
+    input_connectors:  # 该 stage 的输入连接器声明（key = 输入端口名）
+      from_stage_0: connector_of_shared_memory  # 输入端口 from_stage_0 从共享内存连接器读取 Stage 0 的码流
+    default_sampling_params:  # 该 stage 默认采样参数
+      temperature: 0.0  # 温度 0：code2wav 为确定性（贪心）解码，无需随机性
+      top_p: 1.0  # nucleus 阈值 1.0 = 不截断（贪心解码下实际不生效）
+      top_k: -1  # top_k = -1 表示禁用 top-k（贪心解码下实际不生效）
+      max_tokens: 65536  # 单次最大生成 token 数（与 max_model_len 对齐，容纳长码流展开）
+      repetition_penalty: 1.0  # 无重复惩罚（1.0 = 关闭）
 
-platforms:
-  rocm:
+platforms:  # 平台相关覆盖配置：按当前硬件平台覆盖顶层 / stage 设置
+  rocm:  # AMD ROCm 平台
     # MRV2 is not qualified on ROCm; keep the legacy V1 runner.
-    model_runner: v1
-    stages:
-      - stage_id: 1
+    model_runner: v1  # ROCm 未验证 MRV2，使用旧版 V1 运行器
+    stages:  # 该平台下需要覆盖的 stage 配置列表
+      - stage_id: 1  # 覆盖 Stage 1 (code2wav)
         # MIOpen Conv1d cannot be invoked while vLLM captures the outer
         # Code2Wav model graph. Keep CUDA's graph-enabled default, but run
         # Stage 1 eager on ROCm so decoder convolutions execute normally.
-        enforce_eager: true
-  npu:
-    model_runner: v1
-    stages:
-      - stage_id: 0
-        enforce_eager: false
-        compilation_config:
-          cudagraph_mode: PIECEWISE
-      - stage_id: 1
-        compilation_config:
-          cudagraph_mode: PIECEWISE
-  xpu:
-    model_runner: v1
-    stages:
-      - stage_id: 1
+        enforce_eager: true  # ROCm 下 MIOpen Conv1d 无法在外层 CUDA Graph 捕获时调用，Stage 1 强制 eager
+  npu:  # 昇腾 NPU 平台
+    model_runner: v1  # NPU 上使用旧版 V1 运行器（MRV2 未在 NPU 验证）
+    stages:  # 该平台下需要覆盖的 stage 配置列表
+      - stage_id: 0  # 覆盖 Stage 0 (talker)
+        enforce_eager: false  # NPU 上不禁用图执行，配合下方分块图捕获模式
+        compilation_config:  # vLLM 编译配置
+          cudagraph_mode: PIECEWISE  # 分块式图捕获模式：只编译/捕获部分计算块（NPU 后端）
+      - stage_id: 1  # 覆盖 Stage 1 (code2wav)
+        compilation_config:  # vLLM 编译配置
+          cudagraph_mode: PIECEWISE  # 分块式图捕获模式（NPU 后端）
+  xpu:  # Intel XPU 平台
+    model_runner: v1  # XPU 上使用旧版 V1 运行器（MRV2 未在 XPU 验证）
+    stages:  # 该平台下需要覆盖的 stage 配置列表
+      - stage_id: 1  # 覆盖 Stage 1 (code2wav)
         # Level Zero cannot capture the Code2Wav graph.
-        enforce_eager: true
-  musa:
-    model_runner: v1
+        enforce_eager: true  # XPU 的 Level Zero 无法捕获 Code2Wav 图，Stage 1 强制 eager
+  musa:  # 摩尔线程 MUSA 平台
+    model_runner: v1  # MUSA 上使用旧版 V1 运行器（MRV2 未在 MUSA 验证）
